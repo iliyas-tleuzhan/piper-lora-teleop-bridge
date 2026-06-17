@@ -19,7 +19,7 @@ static const uint16_t MAX_PACKET_SIZE = 180;
 static const uint32_t SERIAL_BAUD = 115200;
 static const uint32_t STALE_TIMEOUT_MS = 1000;
 
-SSD1306Wire display(0x3c, 500000, SDA_OLED, SCL_OLED, GEOMETRY_128_64, RST_OLED);
+SSD1306Wire oled(0x3c, 500000, SDA_OLED, SCL_OLED, GEOMETRY_128_64, RST_OLED);
 
 static RadioEvents_t RadioEvents;
 static char rxBuffer[MAX_PACKET_SIZE + 1];
@@ -30,6 +30,13 @@ static volatile int8_t rxSnr = 0;
 static uint32_t lastValidPacketMs = 0;
 static uint32_t lastStalePrintMs = 0;
 static bool staleDisplayed = false;
+
+static void enableExternalPower() {
+  // Heltec WiFi LoRa 32 V4 powers the OLED through Vext. In the Heltec
+  // library examples for this board, Vext is active-low.
+  pinMode(Vext, OUTPUT);
+  digitalWrite(Vext, LOW);
+}
 
 static uint16_t rotateLeft5(uint16_t value) {
   return (uint16_t)((value << 5) | (value >> 11));
@@ -86,30 +93,30 @@ static void drawRxStatus(const char *line, int16_t rssi) {
   long seq = -1;
   extractSeq(line, &seq);
 
-  display.clear();
-  display.setTextAlignment(TEXT_ALIGN_LEFT);
-  display.setFont(ArialMT_Plain_10);
-  display.drawString(0, 0, "Board B");
-  display.drawString(0, 12, "LoRa->Serial");
+  oled.clear();
+  oled.setTextAlignment(TEXT_ALIGN_LEFT);
+  oled.setFont(ArialMT_Plain_10);
+  oled.drawString(0, 0, "Board B");
+  oled.drawString(0, 12, "LoRa->Serial");
   if (seq >= 0) {
-    display.drawString(0, 24, "seq " + String(seq));
+    oled.drawString(0, 24, "seq " + String(seq));
   } else {
-    display.drawString(0, 24, "seq ?");
+    oled.drawString(0, 24, "seq ?");
   }
-  display.drawString(0, 36, "RX ok");
-  display.drawString(0, 48, "RSSI " + String(rssi));
-  display.display();
+  oled.drawString(0, 36, "RX ok");
+  oled.drawString(0, 48, "RSSI " + String(rssi));
+  oled.display();
 }
 
 static void drawStaleStatus() {
-  display.clear();
-  display.setTextAlignment(TEXT_ALIGN_LEFT);
-  display.setFont(ArialMT_Plain_10);
-  display.drawString(0, 0, "Board B");
-  display.drawString(0, 14, "STALE");
-  display.drawString(0, 28, "no LoRa >1s");
-  display.drawString(0, 42, "fake stop");
-  display.display();
+  oled.clear();
+  oled.setTextAlignment(TEXT_ALIGN_LEFT);
+  oled.setFont(ArialMT_Plain_10);
+  oled.drawString(0, 0, "Board B");
+  oled.drawString(0, 14, "STALE");
+  oled.drawString(0, 28, "no LoRa >1s");
+  oled.drawString(0, 42, "fake stop");
+  oled.display();
 }
 
 static void startReceive() {
@@ -198,9 +205,9 @@ void setup() {
   Serial.begin(SERIAL_BAUD);
   delay(1000);
 
-  VextON();
+  enableExternalPower();
   delay(100);
-  display.init();
+  oled.init();
   drawStaleStatus();
   lastValidPacketMs = millis();
 

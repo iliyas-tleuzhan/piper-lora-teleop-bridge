@@ -18,13 +18,20 @@
 static const uint16_t MAX_PACKET_SIZE = 180;
 static const uint32_t SERIAL_BAUD = 115200;
 
-SSD1306Wire display(0x3c, 500000, SDA_OLED, SCL_OLED, GEOMETRY_128_64, RST_OLED);
+SSD1306Wire oled(0x3c, 500000, SDA_OLED, SCL_OLED, GEOMETRY_128_64, RST_OLED);
 
 static RadioEvents_t RadioEvents;
 static char inputLine[MAX_PACKET_SIZE + 1];
 static uint16_t inputPos = 0;
 static bool inputOverflow = false;
 static bool txBusy = false;
+
+static void enableExternalPower() {
+  // Heltec WiFi LoRa 32 V4 powers the OLED through Vext. In the Heltec
+  // library examples for this board, Vext is active-low.
+  pinMode(Vext, OUTPUT);
+  digitalWrite(Vext, LOW);
+}
 
 static uint16_t rotateLeft5(uint16_t value) {
   return (uint16_t)((value << 5) | (value >> 11));
@@ -81,19 +88,19 @@ static void drawStatus(const char *line, const char *status) {
   long seq = -1;
   extractSeq(line, &seq);
 
-  display.clear();
-  display.setTextAlignment(TEXT_ALIGN_LEFT);
-  display.setFont(ArialMT_Plain_10);
-  display.drawString(0, 0, "Board A");
-  display.drawString(0, 12, "Serial->LoRa");
+  oled.clear();
+  oled.setTextAlignment(TEXT_ALIGN_LEFT);
+  oled.setFont(ArialMT_Plain_10);
+  oled.drawString(0, 0, "Board A");
+  oled.drawString(0, 12, "Serial->LoRa");
   if (seq >= 0) {
-    display.drawString(0, 24, "seq " + String(seq));
+    oled.drawString(0, 24, "seq " + String(seq));
   } else {
-    display.drawString(0, 24, "seq ?");
+    oled.drawString(0, 24, "seq ?");
   }
-  display.drawString(0, 36, status);
-  display.drawString(0, 48, "923.2 MHz");
-  display.display();
+  oled.drawString(0, 36, status);
+  oled.drawString(0, 48, "923.2 MHz");
+  oled.display();
 }
 
 static void onTxDone(void) {
@@ -164,9 +171,9 @@ void setup() {
   Serial.begin(SERIAL_BAUD);
   delay(1000);
 
-  VextON();
+  enableExternalPower();
   delay(100);
-  display.init();
+  oled.init();
   drawStatus("", "waiting serial");
 
   Mcu.begin(HELTEC_BOARD, SLOW_CLK_TPYE);
