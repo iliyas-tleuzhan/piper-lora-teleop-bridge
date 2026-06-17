@@ -79,9 +79,27 @@ Attach antennas to both boards before transmitting. Do not run LoRa TX without a
 Board A OLED should show `Board A` and `Serial->LoRa`.
 Board B OLED should show stale until packets arrive.
 
-## Python Setup
+## Python Setup With Conda
 
 Use Python 3.10 or newer.
+
+Create and activate a Conda environment:
+
+```bash
+conda create -n piper-lora-teleop python=3.10
+conda activate piper-lora-teleop
+pip install -r requirements.txt
+```
+
+If you prefer a newer Python available in Conda, Python 3.11 or 3.12 is also fine:
+
+```bash
+conda create -n piper-lora-teleop python=3.11
+conda activate piper-lora-teleop
+pip install -r requirements.txt
+```
+
+Optional non-Conda fallback:
 
 Windows:
 
