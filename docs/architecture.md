@@ -52,12 +52,12 @@ Computer 2:
   -> piper_sdk CAN JointCtrl/GripperCtrl
 ```
 
-`scripts/computer1_piper_sender.py` matches the `piper-wireless-teleop` master sender. It reads raw SocketCAN command frames from the master Piper:
+`scripts/computer1_piper_sender.py` reads raw SocketCAN feedback frames from the master Piper. This follows the physical master pose at script start and avoids replaying a latched old command target:
 
-- `0x155`: joints 1 and 2
-- `0x156`: joints 3 and 4
-- `0x157`: joints 5 and 6
-- `0x159`: optional gripper command
+- `0x2A5`: joints 1 and 2
+- `0x2A6`: joints 3 and 4
+- `0x2A7`: joints 5 and 6
+- `0x2A8`: optional gripper feedback
 
 It stores the latest complete target, waits for Board A to report `TX done`, and sends the newest target over LoRa. The sender does not use `piper_sdk`.
 

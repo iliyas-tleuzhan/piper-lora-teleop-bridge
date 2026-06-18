@@ -80,7 +80,7 @@ def build_piper_teleop_line(
     """Build a raw Piper teleop packet for LoRa transport.
 
     Joint values are Piper SDK/CAN raw units: 0.001 degrees. Gripper values are
-    the raw Piper gripper command fields from CAN ID 0x159.
+    the raw Piper gripper command fields derived from feedback CAN ID 0x2A8.
     """
 
     if len(joints_raw) != 6:

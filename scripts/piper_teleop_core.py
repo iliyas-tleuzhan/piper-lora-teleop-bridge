@@ -10,7 +10,9 @@ from typing import Protocol
 from piper_lora_protocol import PiperTeleopPacket
 
 
-MASTER_CAN_IDS = {0x151, 0x155, 0x156, 0x157, 0x159}
+MASTER_COMMAND_CAN_IDS = {0x151, 0x155, 0x156, 0x157, 0x159}
+MASTER_FEEDBACK_CAN_IDS = {0x2A5, 0x2A6, 0x2A7, 0x2A8}
+MASTER_CAN_IDS = MASTER_COMMAND_CAN_IDS | MASTER_FEEDBACK_CAN_IDS
 RAW_UNITS_PER_DEGREE = 1000
 JOINT_LIMITS_RAW: tuple[tuple[int, int], ...] = (
     (-150000, 150000),
@@ -44,6 +46,7 @@ def decode_i32_be(data: bytes | bytearray | memoryview) -> int:
 @dataclass
 class MasterCommandState:
     joints: list[int | None] = field(default_factory=lambda: [None] * 6)
+    joint_updated_at: list[float | None] = field(default_factory=lambda: [None] * 6)
     gripper: dict[str, int] | None = None
     mode_frame: list[int] | None = None
 
@@ -55,11 +58,26 @@ class MasterCommandState:
             raise ValueError("full joint target is not available yet")
         return [int(value) for value in self.joints]
 
+    def has_fresh_joint_target(self, now_s: float, max_age_s: float) -> bool:
+        if not self.has_full_joint_target():
+            return False
+        return all(
+            updated_at is not None and now_s - updated_at <= max_age_s
+            for updated_at in self.joint_updated_at
+        )
+
+    def update_joint_pair(self, first_index: int, first_value: int, second_value: int) -> None:
+        now_s = time.monotonic()
+        self.joints[first_index] = first_value
+        self.joints[first_index + 1] = second_value
+        self.joint_updated_at[first_index] = now_s
+        self.joint_updated_at[first_index + 1] = now_s
+
 
 def decode_master_frame(message: CanMessage, state: MasterCommandState) -> bool:
     arbitration_id = int(message.arbitration_id)
     data = bytes(message.data)
-    if arbitration_id not in MASTER_CAN_IDS:
+    if arbitration_id not in MASTER_COMMAND_CAN_IDS:
         return False
 
     if arbitration_id == 0x151 and len(data) == 8:
@@ -67,18 +85,15 @@ def decode_master_frame(message: CanMessage, state: MasterCommandState) -> bool:
         return True
 
     if arbitration_id == 0x155 and len(data) == 8:
-        state.joints[0] = decode_i32_be(data[0:4])
-        state.joints[1] = decode_i32_be(data[4:8])
+        state.update_joint_pair(0, decode_i32_be(data[0:4]), decode_i32_be(data[4:8]))
         return True
 
     if arbitration_id == 0x156 and len(data) == 8:
-        state.joints[2] = decode_i32_be(data[0:4])
-        state.joints[3] = decode_i32_be(data[4:8])
+        state.update_joint_pair(2, decode_i32_be(data[0:4]), decode_i32_be(data[4:8]))
         return True
 
     if arbitration_id == 0x157 and len(data) == 8:
-        state.joints[4] = decode_i32_be(data[0:4])
-        state.joints[5] = decode_i32_be(data[4:8])
+        state.update_joint_pair(4, decode_i32_be(data[0:4]), decode_i32_be(data[4:8]))
         return True
 
     if arbitration_id == 0x159 and len(data) == 8:
@@ -86,6 +101,35 @@ def decode_master_frame(message: CanMessage, state: MasterCommandState) -> bool:
             "angle": decode_i32_be(data[0:4]),
             "effort": int.from_bytes(data[4:6], byteorder="big", signed=False),
             "code": data[6],
+        }
+        return True
+
+    return False
+
+
+def decode_master_feedback_frame(message: CanMessage, state: MasterCommandState) -> bool:
+    arbitration_id = int(message.arbitration_id)
+    data = bytes(message.data)
+    if arbitration_id not in MASTER_FEEDBACK_CAN_IDS:
+        return False
+
+    if arbitration_id == 0x2A5 and len(data) == 8:
+        state.update_joint_pair(0, decode_i32_be(data[0:4]), decode_i32_be(data[4:8]))
+        return True
+
+    if arbitration_id == 0x2A6 and len(data) == 8:
+        state.update_joint_pair(2, decode_i32_be(data[0:4]), decode_i32_be(data[4:8]))
+        return True
+
+    if arbitration_id == 0x2A7 and len(data) == 8:
+        state.update_joint_pair(4, decode_i32_be(data[0:4]), decode_i32_be(data[4:8]))
+        return True
+
+    if arbitration_id == 0x2A8 and len(data) == 8:
+        state.gripper = {
+            "angle": decode_i32_be(data[0:4]),
+            "effort": 1000,
+            "code": 1,
         }
         return True
 

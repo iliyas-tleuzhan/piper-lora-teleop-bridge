@@ -46,10 +46,10 @@ PIPER,42,123456,10000,20000,-30000,0,5000,-6000,35000,1000,1,3,20049
 
 Fields:
 
-- `j1_raw` to `j6_raw`: raw Piper joint targets in `0.001 degrees`, decoded directly from master CAN frames `0x155`, `0x156`, and `0x157`.
-- `gripper_angle`: optional raw gripper travel from CAN frame `0x159`, in `0.001 mm`.
-- `gripper_effort`: raw gripper effort from CAN frame `0x159`.
-- `gripper_code`: raw gripper command code from CAN frame `0x159`.
+- `j1_raw` to `j6_raw`: raw Piper joint targets in `0.001 degrees`, decoded from live master feedback frames `0x2A5`, `0x2A6`, and `0x2A7`.
+- `gripper_angle`: optional raw gripper travel from feedback frame `0x2A8`, in `0.001 mm`.
+- `gripper_effort`: raw gripper effort sent to the slave.
+- `gripper_code`: gripper command code sent to the slave.
 - `flags`: integer bitfield.
 - `checksum`: unsigned 16-bit checksum.
 
@@ -113,7 +113,7 @@ The sender is flow-controlled by Board A `TX done`, so it sends the newest targe
 
 The Python real teleoperation scripts map units as follows:
 
-- Piper CAN joint command frames: `0.001 degrees`.
+- Piper CAN joint feedback frames: `0.001 degrees`.
 - LoRa packet real teleop joint fields: `0.001 degrees`.
 - Piper SDK gripper: `0.001 mm`.
-- LoRa packet real teleop gripper field: raw Piper `0x159` gripper command values.
+- LoRa packet real teleop gripper field: derived from Piper `0x2A8` gripper feedback.

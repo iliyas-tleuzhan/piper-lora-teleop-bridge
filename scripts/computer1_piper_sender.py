@@ -13,10 +13,10 @@ import serial
 
 from piper_lora_protocol import build_piper_teleop_line
 from piper_teleop_core import (
-    MASTER_CAN_IDS,
+    MASTER_FEEDBACK_CAN_IDS,
     MasterCommandState,
     RateLimitedPrinter,
-    decode_master_frame,
+    decode_master_feedback_frame,
     raw_to_deg,
 )
 
@@ -27,12 +27,13 @@ STATUS_RATE_HZ = 2.0
 STARTUP_DELAY_S = 3.0
 BOARD_TX_RECOVERY_S = 0.6
 GRIPPER_REFRESH_S = 1.0
+SOURCE_FRAME_TIMEOUT_S = 0.4
 
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description=(
-            "Read master Piper SocketCAN command frames and send raw joint targets "
+            "Read master Piper SocketCAN feedback frames and send raw joint targets "
             "to Board A over serial for LoRa transport."
         )
     )
@@ -125,9 +126,9 @@ def main() -> int:
             print(f"Waiting {STARTUP_DELAY_S:.1f} seconds for ESP32 serial startup...")
             time.sleep(STARTUP_DELAY_S)
 
-            print(f"[MASTER] Reading Piper command CAN frames from {args.can}")
+            print(f"[MASTER] Reading live Piper feedback CAN frames from {args.can}")
             print(f"[MASTER] Sending raw LoRa teleop packets to {args.port} at {args.rate:.2f} Hz")
-            print("[MASTER] Waiting for complete 0x155/0x156/0x157 joint target set")
+            print("[MASTER] Waiting for fresh 0x2A5/0x2A6/0x2A7 joint feedback set")
 
             while not stop_requested:
                 now = time.monotonic()
@@ -138,8 +139,8 @@ def main() -> int:
                     print(f"CAN read failed on {args.can}: {exc}", file=sys.stderr)
                     return 1
 
-                if message is not None and int(message.arbitration_id) in MASTER_CAN_IDS:
-                    decode_master_frame(message, state)
+                if message is not None and int(message.arbitration_id) in MASTER_FEEDBACK_CAN_IDS:
+                    decode_master_feedback_frame(message, state)
 
                 now = time.monotonic()
                 if now < next_send:
@@ -151,8 +152,8 @@ def main() -> int:
                     else:
                         continue
 
-                if not state.has_full_joint_target():
-                    status.print("[MASTER] Waiting for complete joint target frames")
+                if not state.has_fresh_joint_target(now, SOURCE_FRAME_TIMEOUT_S):
+                    status.print("[MASTER] Waiting for fresh joint feedback frames")
                     next_send = now + period
                     continue
 
