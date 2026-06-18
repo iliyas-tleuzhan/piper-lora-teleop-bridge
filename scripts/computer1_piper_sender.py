@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import subprocess
 import signal
 import sys
 import threading
@@ -49,6 +50,20 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--duration", type=float, default=None, help="Optional run time in seconds")
     parser.add_argument("--write-timeout", type=float, default=None, help="Serial write timeout")
     parser.add_argument("--no-flush", action="store_true", help="Do not serial flush after each packet")
+    parser.add_argument(
+        "--can-ok-timeout",
+        type=float,
+        default=0.0,
+        help=(
+            "Seconds to wait for piper_sdk isOk() before exiting. "
+            "0 means wait forever and print diagnostics periodically."
+        ),
+    )
+    parser.add_argument(
+        "--ignore-can-ok",
+        action="store_true",
+        help="Send packets even when piper_sdk isOk() is false. Use only after verifying CAN reads work.",
+    )
     return parser.parse_args()
 
 
@@ -73,7 +88,44 @@ def validate_args(args: argparse.Namespace) -> int:
     if args.write_timeout is not None and args.write_timeout < 0:
         print("--write-timeout must be 0 or greater", file=sys.stderr)
         return 2
+    if args.can_ok_timeout < 0:
+        print("--can-ok-timeout must be 0 or greater", file=sys.stderr)
+        return 2
     return 0
+
+
+def can_link_diagnostics(can_name: str) -> str:
+    try:
+        result = subprocess.run(
+            ["ip", "-details", "link", "show", can_name],
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=2.0,
+        )
+    except (OSError, subprocess.SubprocessError) as exc:
+        return f"Could not run `ip -details link show {can_name}`: {exc}"
+
+    output = (result.stdout or result.stderr).strip()
+    if not output:
+        output = f"`ip -details link show {can_name}` returned no output"
+    return output
+
+
+def print_can_not_ok(can_name: str, *, elapsed: float, timeout: float) -> None:
+    timeout_text = "no timeout" if timeout == 0 else f"timeout={timeout:.1f}s"
+    print(
+        f"Piper SDK CAN reader is not OK yet "
+        f"(waited {elapsed:.1f}s, {timeout_text}). No LoRa packet sent.",
+        file=sys.stderr,
+    )
+    print(can_link_diagnostics(can_name), file=sys.stderr)
+    print(
+        "Check: CAN adapter is connected, Piper is powered, interface is UP at "
+        "1000000 bitrate, and the source mode is correct. For a master arm, try "
+        "`--configure-master`; for a normal/slave arm, try `--source feedback`.",
+        file=sys.stderr,
+    )
 
 
 def main() -> int:
@@ -124,6 +176,8 @@ def main() -> int:
                 f"Streaming real Piper {args.source} state from {args.can} "
                 f"to {args.port} at {args.rate:.2f} Hz. Press Ctrl+C to stop."
             )
+            can_wait_started = time.monotonic()
+            last_can_warning_at = 0.0
             while not stop_requested:
                 now = time.monotonic()
                 if args.duration is not None and now - start_time >= args.duration:
@@ -132,9 +186,19 @@ def main() -> int:
                     time.sleep(min(0.02, next_send - now))
                     continue
 
-                if not arm.is_ok():
-                    print("Piper SDK CAN reader is not OK", file=sys.stderr)
-                    return 1
+                if (not args.ignore_can_ok) and (not arm.is_ok()):
+                    elapsed = now - can_wait_started
+                    if now - last_can_warning_at >= 3.0:
+                        print_can_not_ok(
+                            args.can,
+                            elapsed=elapsed,
+                            timeout=args.can_ok_timeout,
+                        )
+                        last_can_warning_at = now
+                    if args.can_ok_timeout > 0 and elapsed >= args.can_ok_timeout:
+                        return 1
+                    time.sleep(0.1)
+                    continue
 
                 state = (
                     arm.read_control_state()
@@ -178,4 +242,3 @@ def main() -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
-
