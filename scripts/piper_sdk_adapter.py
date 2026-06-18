@@ -37,11 +37,28 @@ def _message_from_sdk_result(result: Any) -> Any:
     return result
 
 
+def _unwrap_message(obj: Any, names: tuple[str, ...]) -> Any:
+    for name in names:
+        if hasattr(obj, name):
+            return getattr(obj, name)
+    return obj
+
+
+def _public_fields(obj: Any) -> list[str]:
+    if hasattr(obj, "__dict__"):
+        return sorted(name for name in vars(obj) if not name.startswith("_"))
+    return sorted(name for name in dir(obj) if not name.startswith("_"))
+
+
 def _field(obj: Any, names: tuple[str, ...]) -> int:
     for name in names:
         if hasattr(obj, name):
             return int(getattr(obj, name))
-    raise AttributeError(f"none of these fields exist on {type(obj).__name__}: {names}")
+    fields = ", ".join(_public_fields(obj))
+    raise AttributeError(
+        f"none of these fields exist on {type(obj).__name__}: {names}. "
+        f"Available public fields: {fields}"
+    )
 
 
 def _joint_fields(obj: Any) -> list[int]:
@@ -107,16 +124,28 @@ class PiperArm:
         self._piper.DisableArm(7)
 
     def read_control_state(self) -> PiperState:
-        joints = _message_from_sdk_result(self._piper.GetArmJointCtrl())
-        gripper = _message_from_sdk_result(self._piper.GetArmGripperCtrl())
+        joints = _unwrap_message(
+            _message_from_sdk_result(self._piper.GetArmJointCtrl()),
+            ("joint_ctrl", "arm_joint_ctrl", "joint_state", "arm_joint_feedback"),
+        )
+        gripper = _unwrap_message(
+            _message_from_sdk_result(self._piper.GetArmGripperCtrl()),
+            ("gripper_ctrl", "arm_gripper_ctrl", "gripper_state", "arm_gripper_feedback"),
+        )
         return PiperState(
             q_mdeg=_joint_fields(joints),
             gripper_um=max(0, _field(gripper, ("grippers_angle", "gripper_angle"))),
         )
 
     def read_feedback_state(self) -> PiperState:
-        joints = _message_from_sdk_result(self._piper.GetArmJointMsgs())
-        gripper = _message_from_sdk_result(self._piper.GetArmGripperMsgs())
+        joints = _unwrap_message(
+            _message_from_sdk_result(self._piper.GetArmJointMsgs()),
+            ("joint_state", "arm_joint_feedback", "joint_ctrl", "arm_joint_ctrl"),
+        )
+        gripper = _unwrap_message(
+            _message_from_sdk_result(self._piper.GetArmGripperMsgs()),
+            ("gripper_state", "arm_gripper_feedback", "gripper_ctrl", "arm_gripper_ctrl"),
+        )
         return PiperState(
             q_mdeg=_joint_fields(joints),
             gripper_um=max(0, _field(gripper, ("grippers_angle", "gripper_angle"))),
@@ -143,4 +172,3 @@ def gripper_p100_to_um(gripper_p100: int, max_mm: float) -> int:
         raise ValueError("gripper max must be greater than 0")
     percent = max(0.0, min(100.0, gripper_p100 / 100.0))
     return int(round(max_um * percent / 100.0))
-
