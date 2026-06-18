@@ -243,3 +243,7 @@ python scripts/list_serial_ports.py
 ```
 
 Close Arduino Serial Monitor and any other process using `/dev/ttyACM0` or `/dev/ttyACM1`.
+
+Board B serial disconnect/reopen messages:
+
+The receiver automatically reopens Board B serial if the ESP32 USB CDC port resets or briefly disconnects. If it keeps printing reopen messages, unplug/replug Board B, check the USB cable, close Arduino Serial Monitor, and rerun `python scripts/list_serial_ports.py` to confirm the port name did not change.

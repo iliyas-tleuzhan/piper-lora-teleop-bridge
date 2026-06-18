@@ -20,6 +20,8 @@ from piper_teleop_core import (
 
 SERIAL_BAUD = 115200
 SERIAL_TIMEOUT_S = 0.005
+SERIAL_REOPEN_DELAY_S = 1.0
+SERIAL_STARTUP_DELAY_S = 1.5
 STALE_TIMEOUT_S = 0.5
 STATUS_RATE_HZ = 2.0
 CONTROL_MODE = 0x01
@@ -83,6 +85,73 @@ def connect_piper(args: argparse.Namespace) -> PiperArm | None:
     return arm
 
 
+def open_board_serial(port: str, baud: int) -> serial.Serial:
+    try:
+        return serial.Serial(port, baud, timeout=SERIAL_TIMEOUT_S, exclusive=True)
+    except TypeError:
+        return serial.Serial(port, baud, timeout=SERIAL_TIMEOUT_S)
+
+
+def handle_serial_line(
+    *,
+    text: str,
+    tracker: SlavePacketTracker,
+    status: RateLimitedPrinter,
+    arm: PiperArm | None,
+    args: argparse.Namespace,
+) -> None:
+    if not text or text.startswith("#"):
+        warn_if_receiver_timeout(tracker, status)
+        return
+    if not text.startswith("PIPER,"):
+        status.print(f"[SLAVE] Ignoring non-PIPER line: {text}")
+        warn_if_receiver_timeout(tracker, status)
+        return
+
+    receiver_time_s = time.monotonic()
+    try:
+        packet = parse_piper_teleop_line(text)
+    except ValueError as exc:
+        status.print(f"[SLAVE] Ignoring malformed LoRa packet: {exc}")
+        warn_if_receiver_timeout(tracker, status)
+        return
+
+    decision = tracker.process_packet(packet, receiver_time_s)
+    if decision.warning:
+        status.print(f"[SLAVE] {decision.warning}")
+    if not decision.accepted:
+        status.print(f"[SLAVE] Ignoring packet: {decision.reason}")
+        warn_if_receiver_timeout(tracker, status)
+        return
+
+    target_joints = decision.target_joints
+    if target_joints is None:
+        status.print("[SLAVE] Ignoring packet: missing joints")
+        return
+
+    next_joints = clamp_joints_raw(target_joints)
+
+    if arm is not None:
+        arm.write_joints_raw(next_joints, dry_run=args.dry_run)
+        if decision.gripper is not None:
+            arm.write_gripper_raw(
+                decision.gripper,
+                default_effort=GRIPPER_DEFAULT_EFFORT,
+                dry_run=args.dry_run,
+            )
+
+    command_rate_hz = tracker.command_rate_hz(time.monotonic())
+    command_rate_text = "unknown" if command_rate_hz is None else f"{command_rate_hz:.1f}Hz"
+    status.print(
+        f"[SLAVE] accepted seq={decision.sequence} "
+        f"dropped={decision.dropped} total_dropped={decision.total_dropped} "
+        f"cmd_rate={command_rate_text} "
+        f"target_deg={[round(raw_to_deg(value), 3) for value in target_joints]} "
+        f"cmd_deg={[round(raw_to_deg(value), 3) for value in next_joints]} "
+        f"gripper={decision.gripper}"
+    )
+
+
 def main() -> int:
     args = parse_args()
     if exit_code := validate_args(args):
@@ -97,78 +166,57 @@ def main() -> int:
         print(f"Piper CAN setup failed: {exc}", file=sys.stderr)
         return 1
 
-    print(f"Opening Board B serial {args.port} at {args.baud} baud")
     if args.dry_run:
         print("[SLAVE] dry-run: not connecting to Piper and not writing CAN commands")
     else:
         print(f"[SLAVE] Arm enabled on {args.can}; motion mode configured")
 
     try:
-        with serial.Serial(args.port, args.baud, timeout=SERIAL_TIMEOUT_S) as ser:
-            print("[SLAVE] Waiting for raw Piper LoRa teleop packets. Press Ctrl+C to stop.")
-            while True:
-                raw = ser.readline()
-                if not raw:
-                    warn_if_receiver_timeout(tracker, status)
-                    continue
+        while True:
+            print(f"Opening Board B serial {args.port} at {args.baud} baud")
+            try:
+                with open_board_serial(args.port, args.baud) as ser:
+                    print(
+                        f"[SLAVE] Waiting {SERIAL_STARTUP_DELAY_S:.1f}s for Board B serial startup"
+                    )
+                    time.sleep(SERIAL_STARTUP_DELAY_S)
+                    try:
+                        ser.reset_input_buffer()
+                    except serial.SerialException:
+                        pass
 
-                text = raw.decode("ascii", errors="replace").strip()
-                if not text or text.startswith("#"):
-                    warn_if_receiver_timeout(tracker, status)
-                    continue
-                if not text.startswith("PIPER,"):
-                    status.print(f"[SLAVE] Ignoring non-PIPER line: {text}")
-                    warn_if_receiver_timeout(tracker, status)
-                    continue
+                    print("[SLAVE] Waiting for raw Piper LoRa teleop packets. Press Ctrl+C to stop.")
+                    while True:
+                        try:
+                            raw = ser.readline()
+                        except serial.SerialException as exc:
+                            print(
+                                f"[SLAVE] Board B serial lost: {exc}. Reopening...",
+                                file=sys.stderr,
+                            )
+                            break
 
-                receiver_time_s = time.monotonic()
-                try:
-                    packet = parse_piper_teleop_line(text)
-                except ValueError as exc:
-                    status.print(f"[SLAVE] Ignoring malformed LoRa packet: {exc}")
-                    warn_if_receiver_timeout(tracker, status)
-                    continue
+                        if not raw:
+                            warn_if_receiver_timeout(tracker, status)
+                            continue
 
-                decision = tracker.process_packet(packet, receiver_time_s)
-                if decision.warning:
-                    status.print(f"[SLAVE] {decision.warning}")
-                if not decision.accepted:
-                    status.print(f"[SLAVE] Ignoring packet: {decision.reason}")
-                    warn_if_receiver_timeout(tracker, status)
-                    continue
-
-                target_joints = decision.target_joints
-                if target_joints is None:
-                    status.print("[SLAVE] Ignoring packet: missing joints")
-                    continue
-
-                next_joints = clamp_joints_raw(target_joints)
-
-                if arm is not None:
-                    arm.write_joints_raw(next_joints, dry_run=args.dry_run)
-                    if decision.gripper is not None:
-                        arm.write_gripper_raw(
-                            decision.gripper,
-                            default_effort=GRIPPER_DEFAULT_EFFORT,
-                            dry_run=args.dry_run,
+                        handle_serial_line(
+                            text=raw.decode("ascii", errors="replace").strip(),
+                            tracker=tracker,
+                            status=status,
+                            arm=arm,
+                            args=args,
                         )
-
-                command_rate_hz = tracker.command_rate_hz(time.monotonic())
-                command_rate_text = "unknown" if command_rate_hz is None else f"{command_rate_hz:.1f}Hz"
-                status.print(
-                    f"[SLAVE] accepted seq={decision.sequence} "
-                    f"dropped={decision.dropped} total_dropped={decision.total_dropped} "
-                    f"cmd_rate={command_rate_text} "
-                    f"target_deg={[round(raw_to_deg(value), 3) for value in target_joints]} "
-                    f"cmd_deg={[round(raw_to_deg(value), 3) for value in next_joints]} "
-                    f"gripper={decision.gripper}"
+            except serial.SerialException as exc:
+                print(
+                    f"[SLAVE] Cannot open Board B serial {args.port}: {exc}. "
+                    f"Retrying in {SERIAL_REOPEN_DELAY_S:.1f}s...",
+                    file=sys.stderr,
                 )
+            time.sleep(SERIAL_REOPEN_DELAY_S)
     except KeyboardInterrupt:
         print("\n[SLAVE] stopped")
         return 0
-    except serial.SerialException as exc:
-        print(f"Serial error on {args.port}: {exc}", file=sys.stderr)
-        return 1
     finally:
         if arm is not None:
             arm.disconnect()
