@@ -9,7 +9,7 @@ import time
 
 import serial
 
-from piper_lora_protocol import parse_piper_teleop_line
+from piper_lora_protocol import PiperTeleopPacket, extract_piper_teleop_packets
 from piper_sdk_adapter import PiperArm, PiperSdkUnavailable
 from piper_teleop_core import (
     RateLimitedPrinter,
@@ -38,7 +38,7 @@ def parse_args() -> argparse.Namespace:
             "slave Piper over CAN."
         )
     )
-    parser.add_argument("--port", required=True, help="Board B serial port, for example /dev/ttyACM1")
+    parser.add_argument("--port", required=True, help="Board B serial port, for example /dev/ttyACM0")
     parser.add_argument("--can", default="can0", help="Slave Piper CAN interface")
     parser.add_argument("--confirm", default="", help="Must be MOVE to allow robot motion")
     parser.add_argument(
@@ -92,30 +92,15 @@ def open_board_serial(port: str, baud: int) -> serial.Serial:
         return serial.Serial(port, baud, timeout=SERIAL_TIMEOUT_S)
 
 
-def handle_serial_line(
+def handle_packet(
     *,
-    text: str,
+    packet: PiperTeleopPacket,
     tracker: SlavePacketTracker,
     status: RateLimitedPrinter,
     arm: PiperArm | None,
     args: argparse.Namespace,
 ) -> None:
-    if not text or text.startswith("#"):
-        warn_if_receiver_timeout(tracker, status)
-        return
-    if not text.startswith("PIPER,"):
-        status.print(f"[SLAVE] Ignoring non-PIPER line: {text}")
-        warn_if_receiver_timeout(tracker, status)
-        return
-
     receiver_time_s = time.monotonic()
-    try:
-        packet = parse_piper_teleop_line(text)
-    except ValueError as exc:
-        status.print(f"[SLAVE] Ignoring malformed LoRa packet: {exc}")
-        warn_if_receiver_timeout(tracker, status)
-        return
-
     decision = tracker.process_packet(packet, receiver_time_s)
     if decision.warning:
         status.print(f"[SLAVE] {decision.warning}")
@@ -185,10 +170,12 @@ def main() -> int:
                     except serial.SerialException:
                         pass
 
+                    serial_buffer = bytearray()
                     print("[SLAVE] Waiting for raw Piper LoRa teleop packets. Press Ctrl+C to stop.")
                     while True:
                         try:
-                            raw = ser.readline()
+                            waiting = getattr(ser, "in_waiting", 0)
+                            raw = ser.read(max(1, min(waiting or 1, 256)))
                         except serial.SerialException as exc:
                             print(
                                 f"[SLAVE] Board B serial lost: {exc}. Reopening...",
@@ -200,13 +187,20 @@ def main() -> int:
                             warn_if_receiver_timeout(tracker, status)
                             continue
 
-                        handle_serial_line(
-                            text=raw.decode("ascii", errors="replace").strip(),
-                            tracker=tracker,
-                            status=status,
-                            arm=arm,
-                            args=args,
-                        )
+                        serial_buffer.extend(raw)
+                        packets = extract_piper_teleop_packets(serial_buffer)
+                        if not packets:
+                            warn_if_receiver_timeout(tracker, status)
+                            continue
+
+                        for packet in packets:
+                            handle_packet(
+                                packet=packet,
+                                tracker=tracker,
+                                status=status,
+                                arm=arm,
+                                args=args,
+                            )
             except serial.SerialException as exc:
                 print(
                     f"[SLAVE] Cannot open Board B serial {args.port}: {exc}. "

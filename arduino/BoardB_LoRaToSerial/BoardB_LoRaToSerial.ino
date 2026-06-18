@@ -2,12 +2,11 @@
 #include "LoRaWan_APP.h"
 #include "HT_SSD1306Wire.h"
 
-// Board B: LoRa -> USB Serial.
-// This first version validates fake PIPER packets and forwards them to Python.
+// Board B: LoRa -> USB Serial for real Piper teleop packets.
 
 #define RF_FREQUENCY 923200000
 #define TX_OUTPUT_POWER 10
-#define LORA_BANDWIDTH 0
+#define LORA_BANDWIDTH 1
 #define LORA_SPREADING_FACTOR 7
 #define LORA_CODINGRATE 1
 #define LORA_PREAMBLE_LENGTH 8
@@ -15,14 +14,15 @@
 #define LORA_FIX_LENGTH_PAYLOAD_ON false
 #define LORA_IQ_INVERSION_ON false
 
-static const uint16_t MAX_PACKET_SIZE = 180;
+static const uint16_t TELEOP_PACKET_SIZE = 47;
 static const uint32_t SERIAL_BAUD = 115200;
 static const uint32_t STALE_TIMEOUT_MS = 1000;
+static const uint8_t TELEOP_MAGIC[4] = {'P', 'L', 'T', '1'};
 
 SSD1306Wire oled(0x3c, 500000, SDA_OLED, SCL_OLED, GEOMETRY_128_64, RST_OLED);
 
 static RadioEvents_t RadioEvents;
-static char rxBuffer[MAX_PACKET_SIZE + 1];
+static uint8_t rxBuffer[TELEOP_PACKET_SIZE];
 static volatile bool rxDone = false;
 static volatile uint16_t rxSize = 0;
 static volatile int16_t rxRssi = 0;
@@ -38,71 +38,60 @@ static void enableExternalPower() {
   digitalWrite(Vext, LOW);
 }
 
-static uint16_t rotateLeft5(uint16_t value) {
-  return (uint16_t)((value << 5) | (value >> 11));
+static uint16_t crc16Ccitt(const uint8_t *payload, uint16_t length) {
+  uint16_t crc = 0xFFFF;
+  for (uint16_t index = 0; index < length; index++) {
+    crc ^= (uint16_t)payload[index] << 8;
+    for (uint8_t bit = 0; bit < 8; bit++) {
+      if ((crc & 0x8000) != 0) {
+        crc = (uint16_t)((crc << 1) ^ 0x1021);
+      } else {
+        crc = (uint16_t)(crc << 1);
+      }
+    }
+  }
+  return crc;
 }
 
-static uint16_t checksum16(const char *payload) {
-  uint16_t c = 0x1234;
-  while (*payload) {
-    c = rotateLeft5(c);
-    c ^= (uint8_t)(*payload);
-    payload++;
-  }
-  return c;
+static uint16_t readLe16(const uint8_t *data) {
+  return (uint16_t)data[0] | ((uint16_t)data[1] << 8);
 }
 
-static bool startsWithPiper(const char *line) {
-  return strncmp(line, "PIPER,", 6) == 0;
+static uint32_t readLeU32(const uint8_t *data) {
+  return (uint32_t)data[0] | ((uint32_t)data[1] << 8) |
+         ((uint32_t)data[2] << 16) | ((uint32_t)data[3] << 24);
 }
 
-static bool extractSeq(const char *line, long *seqOut) {
-  if (!startsWithPiper(line)) {
-    return false;
+static bool hasMagic(const uint8_t *packet) {
+  for (uint8_t index = 0; index < 4; index++) {
+    if (packet[index] != TELEOP_MAGIC[index]) {
+      return false;
+    }
   }
-  char *endPtr = nullptr;
-  long seq = strtol(line + 6, &endPtr, 10);
-  if (endPtr == line + 6 || *endPtr != ',') {
-    return false;
-  }
-  *seqOut = seq;
   return true;
 }
 
-static bool validateChecksum(char *line) {
-  char *lastComma = strrchr(line, ',');
-  if (lastComma == nullptr) {
+static bool validatePacket(const uint8_t *packet, uint16_t size) {
+  if (size != TELEOP_PACKET_SIZE || !hasMagic(packet)) {
     return false;
   }
-
-  char *checksumText = lastComma + 1;
-  char *endPtr = nullptr;
-  unsigned long received = strtoul(checksumText, &endPtr, 10);
-  if (endPtr == checksumText || *endPtr != '\0' || received > 65535UL) {
-    return false;
-  }
-
-  *lastComma = '\0';
-  uint16_t expected = checksum16(line);
-  *lastComma = ',';
-
-  return expected == (uint16_t)received;
+  uint16_t received = readLe16(packet + TELEOP_PACKET_SIZE - 2);
+  uint16_t expected = crc16Ccitt(packet, TELEOP_PACKET_SIZE - 2);
+  return received == expected;
 }
 
-static void drawRxStatus(const char *line, int16_t rssi) {
-  long seq = -1;
-  extractSeq(line, &seq);
+static uint32_t packetSeq(const uint8_t *packet) {
+  return readLeU32(packet + 5);
+}
+
+static void drawRxStatus(uint32_t seq, int16_t rssi) {
 
   oled.clear();
   oled.setTextAlignment(TEXT_ALIGN_LEFT);
   oled.setFont(ArialMT_Plain_10);
   oled.drawString(0, 0, "Board B");
   oled.drawString(0, 12, "LoRa->Serial");
-  if (seq >= 0) {
-    oled.drawString(0, 24, "seq " + String(seq));
-  } else {
-    oled.drawString(0, 24, "seq ?");
-  }
+  oled.drawString(0, 24, "seq " + String(seq));
   oled.drawString(0, 36, "RX ok");
   oled.drawString(0, 48, "RSSI " + String(rssi));
   oled.display();
@@ -115,7 +104,7 @@ static void drawStaleStatus() {
   oled.drawString(0, 0, "Board B");
   oled.drawString(0, 14, "STALE");
   oled.drawString(0, 28, "no LoRa >1s");
-  oled.drawString(0, 42, "fake stop");
+  oled.drawString(0, 42, "holding");
   oled.display();
 }
 
@@ -125,11 +114,10 @@ static void startReceive() {
 
 static void onRxDone(uint8_t *payload, uint16_t size, int16_t rssi, int8_t snr) {
   uint16_t copySize = size;
-  if (copySize > MAX_PACKET_SIZE) {
-    copySize = MAX_PACKET_SIZE;
+  if (copySize > TELEOP_PACKET_SIZE) {
+    copySize = TELEOP_PACKET_SIZE;
   }
   memcpy(rxBuffer, payload, copySize);
-  rxBuffer[copySize] = '\0';
   rxSize = copySize;
   rxRssi = rssi;
   rxSnr = snr;
@@ -151,35 +139,26 @@ static void onRxError(void) {
 static void processReceivedPacket() {
   rxDone = false;
 
-  // Trim a trailing newline if a sender included one.
-  while (rxSize > 0 && (rxBuffer[rxSize - 1] == '\n' || rxBuffer[rxSize - 1] == '\r')) {
-    rxBuffer[rxSize - 1] = '\0';
-    rxSize--;
-  }
-
-  Serial.print("# LoRa packet received RSSI=");
-  Serial.print(rxRssi);
-  Serial.print(" SNR=");
-  Serial.println(rxSnr);
-
-  if (!startsWithPiper(rxBuffer)) {
-    Serial.println("# Dropping non-PIPER packet");
-    startReceive();
-    return;
-  }
-  if (!validateChecksum(rxBuffer)) {
-    Serial.print("# Dropping invalid checksum: ");
-    Serial.println(rxBuffer);
+  if (!validatePacket(rxBuffer, rxSize)) {
+    Serial.println("# Dropping invalid binary packet");
     startReceive();
     return;
   }
 
+  uint32_t seq = packetSeq(rxBuffer);
   lastValidPacketMs = millis();
   staleDisplayed = false;
-  drawRxStatus(rxBuffer, rxRssi);
+  Serial.write(rxBuffer, TELEOP_PACKET_SIZE);
+  drawRxStatus(seq, rxRssi);
 
-  // This exact PIPER line is consumed by computer2_fake_receiver.py.
-  Serial.println(rxBuffer);
+  Serial.print("# LoRa packet received seq=");
+  Serial.print(seq);
+  Serial.print(" RSSI=");
+  Serial.print(rxRssi);
+  Serial.print(" SNR=");
+  Serial.print(rxSnr);
+  Serial.print(" size=");
+  Serial.println(rxSize);
   startReceive();
 }
 
@@ -196,7 +175,7 @@ static void checkStale() {
   }
 
   if (lastStalePrintMs == 0 || now - lastStalePrintMs > 3000) {
-    Serial.println("# STALE: no valid LoRa packet for >1s, fake slave would stop/freeze");
+    Serial.println("# STALE: no valid LoRa packet for >1s, receiver should hold last command");
     lastStalePrintMs = now;
   }
 }
@@ -222,7 +201,7 @@ void setup() {
                     LORA_SYMBOL_TIMEOUT, LORA_FIX_LENGTH_PAYLOAD_ON,
                     0, true, 0, 0, LORA_IQ_INVERSION_ON, true);
 
-  Serial.println("# Board B LoRa->Serial ready at 923.2 MHz");
+  Serial.println("# Board B LoRa->Serial ready at 923.2 MHz BW250 SF7");
   startReceive();
 }
 

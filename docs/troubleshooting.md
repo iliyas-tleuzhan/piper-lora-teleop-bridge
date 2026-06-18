@@ -54,8 +54,8 @@ The COM port can change when the board enters bootloader mode. Recheck the selec
 Arduino Serial Monitor and Python cannot both open the same serial port. Close Serial Monitor before running:
 
 ```bash
-python scripts/computer1_fake_sender.py --port COM9 --rate 5
-python scripts/computer2_fake_receiver.py --port COM10
+python scripts/computer2_piper_receiver.py --port /dev/ttyACM0 --can can0 --dry-run
+python scripts/computer1_piper_sender.py --port /dev/ttyACM0 --can can0
 ```
 
 ## Antennas Not Attached
@@ -69,7 +69,8 @@ Check:
 - Both boards have antennas attached.
 - Board B sketch was uploaded and is powered.
 - Both sketches use `RF_FREQUENCY 923200000`.
-- Both sketches use the same bandwidth, spreading factor, coding rate, preamble, IQ inversion, and CRC settings.
+- Both sketches use `LORA_BANDWIDTH 1`.
+- Both sketches use the same spreading factor, coding rate, preamble, IQ inversion, and CRC settings.
 - Boards are not too far apart for the first test. Start a few meters apart.
 
 ## Mismatched Frequency Or Settings
@@ -78,7 +79,7 @@ The sketches must match:
 
 ```text
 Frequency: 923200000
-Bandwidth: 125 kHz
+Bandwidth: 250 kHz
 Spreading factor: SF7
 Coding rate: 4/5
 Preamble length: 8
@@ -86,11 +87,11 @@ IQ inversion: off
 CRC: on
 ```
 
-## Invalid Checksum
+## Invalid Binary Packet
 
-If Board A prints `WARN: dropping invalid checksum`, the Computer 1 script and sketch do not agree on the checksum or the serial line was edited/corrupted.
+If Board A prints `WARN: dropping invalid binary packet`, Computer 1 and Board A are not using the same binary packet format. Pull the latest repo on Computer 1 and re-upload Board A from the same repo.
 
-If Board B prints `# Dropping invalid checksum`, the LoRa payload was corrupted or the two boards are running mismatched firmware. Re-upload both sketches from this repo.
+If Board B prints `# Dropping invalid binary packet`, Board A and Board B are running mismatched firmware or the LoRa payload was corrupted. Re-upload both sketches from the same repo.
 
 ## Stale Packet Warning
 
@@ -101,6 +102,24 @@ Common causes:
 - Computer 1 sender is not running.
 - Board A is not connected to Computer 1.
 - Wrong serial port was used.
-- Board A is dropping packets due to invalid checksum.
+- Board A is dropping packets due to invalid binary packets.
 - Board B is not receiving LoRa packets.
 - Frequency or LoRa settings do not match.
+
+## Slave Does Not Follow Master Joints
+
+On Computer 1, check live master feedback:
+
+```bash
+candump can0
+```
+
+You must see `0x2A5`, `0x2A6`, and `0x2A7`, and the data should change when you move the master arm. If only gripper-related frames change, the slave will only appear to follow the gripper.
+
+## Slave Jumps To An Old Pose On Startup
+
+This should not happen with the current sender because it uses live feedback frames only. If it happens, confirm you pulled the latest repo on Computer 1 and that the sender prints:
+
+```text
+[MASTER] Waiting for fresh 0x2A5/0x2A6/0x2A7 joint feedback set
+```

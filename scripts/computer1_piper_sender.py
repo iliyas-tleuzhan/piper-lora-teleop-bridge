@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Computer 1: raw master Piper CAN commands -> Board A serial -> LoRa."""
+"""Computer 1: live master Piper CAN feedback -> Board A serial -> LoRa."""
 
 from __future__ import annotations
 
@@ -11,21 +11,21 @@ import time
 
 import serial
 
-from piper_lora_protocol import build_piper_teleop_line
+from piper_lora_protocol import BINARY_PACKET_SIZE, build_piper_teleop_packet
 from piper_teleop_core import (
     MASTER_FEEDBACK_CAN_IDS,
-    MasterCommandState,
+    MasterFeedbackState,
     RateLimitedPrinter,
     decode_master_feedback_frame,
     raw_to_deg,
 )
 
-DEFAULT_SEND_RATE_HZ = 8.0
+DEFAULT_SEND_RATE_HZ = 15.0
 SERIAL_BAUD = 115200
 CAN_RECV_TIMEOUT_S = 0.005
 STATUS_RATE_HZ = 2.0
 STARTUP_DELAY_S = 3.0
-BOARD_TX_RECOVERY_S = 0.6
+BOARD_TX_RECOVERY_S = 0.2
 GRIPPER_REFRESH_S = 1.0
 SOURCE_FRAME_TIMEOUT_S = 0.4
 
@@ -101,7 +101,7 @@ def main() -> int:
 
     period = 1.0 / args.rate
     seq = 0
-    state = MasterCommandState()
+    state = MasterFeedbackState()
     status = RateLimitedPrinter(STATUS_RATE_HZ)
     start_time = time.monotonic()
     next_send = start_time
@@ -127,7 +127,10 @@ def main() -> int:
             time.sleep(STARTUP_DELAY_S)
 
             print(f"[MASTER] Reading live Piper feedback CAN frames from {args.can}")
-            print(f"[MASTER] Sending raw LoRa teleop packets to {args.port} at {args.rate:.2f} Hz")
+            print(
+                f"[MASTER] Sending {BINARY_PACKET_SIZE}-byte LoRa teleop packets "
+                f"to {args.port} at {args.rate:.2f} Hz"
+            )
             print("[MASTER] Waiting for fresh 0x2A5/0x2A6/0x2A7 joint feedback set")
 
             while not stop_requested:
@@ -165,7 +168,7 @@ def main() -> int:
                     if gripper_changed or gripper_refresh_due:
                         gripper_to_send = state.gripper
 
-                line = build_piper_teleop_line(
+                packet = build_piper_teleop_packet(
                     seq,
                     sender_time_ms,
                     state.joints_raw(),
@@ -174,7 +177,7 @@ def main() -> int:
                 )
                 try:
                     tx_ready.clear()
-                    ser.write(line.encode("ascii"))
+                    ser.write(packet)
                     ser.flush()
                 except serial.SerialTimeoutException as exc:
                     print(f"Serial write timed out: {exc}", file=sys.stderr)

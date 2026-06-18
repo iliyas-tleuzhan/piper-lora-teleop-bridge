@@ -2,13 +2,13 @@
 
 Real LoRa teleoperation between two AgileX Piper robot arms using two Heltec ESP32 WiFi LoRa 32 V4 boards.
 
-This project mirrors the `piper-wireless-teleop` UDP control behavior, but replaces UDP/Wi-Fi with:
+This project mirrors the working `piper-wireless-teleop` UDP behavior, but replaces UDP/Wi-Fi with:
 
 ```text
 Computer 1 -> USB Serial -> ESP32 Board A -> LoRa -> ESP32 Board B -> USB Serial -> Computer 2
 ```
 
-The ESP32 boards are serial LoRa modems. They do not understand Piper CAN. Computer 1 reads live master Piper SocketCAN feedback frames, sends compact `PIPER` packets over LoRa, and Computer 2 validates those packets before commanding the slave Piper with `piper_sdk`.
+The ESP32 boards are simple serial LoRa modems. They do not understand Piper CAN. Computer 1 reads live master Piper SocketCAN feedback frames, sends compact 47-byte binary `PLT1` packets over LoRa, and Computer 2 validates those packets before commanding the slave Piper with `piper_sdk`.
 
 ## Hardware
 
@@ -23,11 +23,13 @@ Use two separate Piper CAN buses:
 
 Do not connect both Piper arms to the same CAN bus for wireless teleop.
 
-## Step 1: Clone And Create Conda Env
+## Step 1: Clean Clone And Create Conda Env
 
-Run on both computers:
+Run on both computers. If you are resetting from an old checkout, remove the old folders first:
 
 ```bash
+cd ~/Iliyas
+rm -rf piper-lora-teleop-bridge piper-lora-teleop-bridge-main
 git clone https://github.com/iliyas-tleuzhan/piper-lora-teleop-bridge.git
 cd piper-lora-teleop-bridge
 conda create -n piper-lora-teleop python=3.11
@@ -86,7 +88,7 @@ For teleop, Computer 1 must see these master feedback IDs:
 - `0x2A7`: joints 5 and 6
 - `0x2A8`: optional gripper feedback
 
-If Computer 1 later prints `Waiting for fresh joint feedback frames`, run `candump can0` and verify `0x2A5`, `0x2A6`, and `0x2A7` are present.
+If Computer 1 prints `Waiting for fresh joint feedback frames`, run `candump can0` and verify `0x2A5`, `0x2A6`, and `0x2A7` are present and changing when you move the master arm. If those IDs are missing, Computer 1 is not seeing the live physical master pose.
 
 ## Step 3: Upload ESP32 Firmware
 
@@ -127,12 +129,7 @@ Run on each computer:
 python scripts/list_serial_ports.py
 ```
 
-Common Linux ports:
-
-- Board A on Computer 1: `/dev/ttyACM0`
-- Board B on Computer 2: `/dev/ttyACM1`
-
-Use the actual ports printed by the script. Close Arduino Serial Monitor before running Python.
+Use the actual ports printed by the script. On separate Linux computers, each board is often `/dev/ttyACM0`. Close Arduino Serial Monitor before running Python.
 
 ## Step 5: Start Computer 2 First
 
@@ -140,8 +137,8 @@ On Computer 2, connected to the slave Piper and Board B:
 
 ```bash
 conda activate piper-lora-teleop
-cd piper-lora-teleop-bridge
-python scripts/computer2_piper_receiver.py --port /dev/ttyACM1 --can can0 --confirm MOVE
+cd ~/Iliyas/piper-lora-teleop-bridge
+python scripts/computer2_piper_receiver.py --port /dev/ttyACM0 --can can0 --confirm MOVE
 ```
 
 `--confirm MOVE` is required. Without it, the receiver refuses to command the robot.
@@ -152,25 +149,28 @@ Optional receiver check:
 
 ## Step 6: Start Computer 1
 
+Before starting, put the master and slave arms in similar safe poses.
+
 On Computer 1, connected to the master Piper and Board A:
 
 ```bash
 conda activate piper-lora-teleop
-cd piper-lora-teleop-bridge
+cd ~/Iliyas/piper-lora-teleop-bridge
 python scripts/computer1_piper_sender.py --port /dev/ttyACM0 --can can0
 ```
 
-The sender uses a live deadman by default. It also waits for Board A `TX done` before sending the next packet, so it does not build up stale serial data when the radio is busy.
+The sender uses live feedback frames, not latched command frames. It waits for a fresh full set of `0x2A5`, `0x2A6`, and `0x2A7`, then sends the newest target only when Board A reports `TX done`.
 
 ## Expected Output
 
-Computer 1 should eventually print status like:
+Computer 1 should print:
 
 ```text
+[MASTER] Sending 47-byte LoRa teleop packets to /dev/ttyACM0 at 15.00 Hz
 [MASTER] seq=12 deg=[...] gripper=unchanged
 ```
 
-Computer 2 should print status like:
+Computer 2 should print:
 
 ```text
 [SLAVE] accepted seq=12 dropped=0 total_dropped=0 cmd_rate=...
@@ -179,20 +179,25 @@ Computer 2 should print status like:
 If Computer 2 prints no accepted packets:
 
 1. Confirm Board A and Board B are powered and have antennas.
-2. Confirm both ESP32 sketches use `923200000` Hz.
-3. Confirm the serial ports are correct and not open in Arduino Serial Monitor.
-4. Confirm Computer 1 sees `0x2A5`, `0x2A6`, and `0x2A7` with `candump can0`.
+2. Confirm both ESP32 sketches were re-uploaded from this repo.
+3. Confirm both ESP32 sketches use `923200000` Hz and `LORA_BANDWIDTH 1`.
+4. Confirm the serial ports are correct and not open in Arduino Serial Monitor.
+5. Confirm Computer 1 sees `0x2A5`, `0x2A6`, and `0x2A7` with `candump can0`.
 
-## LoRa Settings
+## Hong Kong LoRa Settings
+
+The firmware is configured for Hong Kong operation in the 920-925 MHz band:
 
 - Frequency: `923200000` Hz
 - TX power: `10` dBm
-- Bandwidth: `125 kHz`
+- Bandwidth: `250 kHz`
 - Spreading factor: `SF7`
 - Coding rate: `4/5`
 - Preamble length: `8`
 - IQ inversion: off
 - CRC: enabled
+
+`923.2 MHz` with `250 kHz` bandwidth stays inside 920-925 MHz. The lower-latency transport comes from two changes: the real packets are now fixed 47-byte binary frames, and the radio bandwidth is now 250 kHz instead of 125 kHz.
 
 ## Safety Checklist
 
@@ -242,7 +247,7 @@ Serial port busy:
 python scripts/list_serial_ports.py
 ```
 
-Close Arduino Serial Monitor and any other process using `/dev/ttyACM0` or `/dev/ttyACM1`.
+Close Arduino Serial Monitor and any other process using `/dev/ttyACM0` or the port shown by `list_serial_ports.py`.
 
 Board B serial disconnect/reopen messages:
 

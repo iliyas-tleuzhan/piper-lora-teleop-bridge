@@ -1,23 +1,18 @@
 #!/usr/bin/env python3
-"""Shared LoRa packet helpers for Piper teleoperation."""
+"""Shared binary LoRa packet helpers for Piper teleoperation."""
 
 from __future__ import annotations
 
+import struct
 from dataclasses import dataclass
 
 
 DEADMAN_ENABLED = 0x01
 GRIPPER_PRESENT = 0x02
-PIPER_MAGIC = "PIPER"
-
-
-@dataclass(frozen=True)
-class PiperPacket:
-    seq: int
-    sender_time_ms: int
-    q_cd: list[int]
-    gripper_p100: int
-    flags: int
+PIPER_BINARY_MAGIC = b"PLT1"
+_BINARY_PACKET_WITHOUT_CRC = struct.Struct("<4sBII6iiHBB")
+_BINARY_PACKET = struct.Struct("<4sBII6iiHBBH")
+BINARY_PACKET_SIZE = _BINARY_PACKET.size
 
 
 @dataclass(frozen=True)
@@ -39,146 +34,129 @@ class PiperTeleopPacket:
         return bool(self.flags & GRIPPER_PRESENT)
 
 
-def checksum16(payload: str) -> int:
-    c = 0x1234
-    for byte in payload.encode("ascii"):
-        c = ((c << 5) | (c >> 11)) & 0xFFFF
-        c ^= byte
-    return c & 0xFFFF
+def crc16_ccitt(payload: bytes) -> int:
+    crc = 0xFFFF
+    for byte in payload:
+        crc ^= byte << 8
+        for _ in range(8):
+            if crc & 0x8000:
+                crc = ((crc << 1) ^ 0x1021) & 0xFFFF
+            else:
+                crc = (crc << 1) & 0xFFFF
+    return crc
 
 
-def build_piper_line(
-    seq: int,
-    sender_time_ms: int,
-    q_cd: list[int],
-    gripper_p100: int,
-    flags: int,
-) -> str:
-    if len(q_cd) != 6:
-        raise ValueError(f"expected 6 joint values, got {len(q_cd)}")
-
-    fields = [
-        PIPER_MAGIC,
-        str(seq),
-        str(sender_time_ms),
-        *(str(value) for value in q_cd),
-        str(gripper_p100),
-        str(flags),
-    ]
-    payload = ",".join(fields)
-    return f"{payload},{checksum16(payload)}\n"
-
-
-def build_piper_teleop_line(
+def build_piper_teleop_packet(
     seq: int,
     sender_time_ms: int,
     joints_raw: list[int],
     *,
     deadman: bool,
     gripper: dict[str, int] | None = None,
-) -> str:
-    """Build a raw Piper teleop packet for LoRa transport.
-
-    Joint values are Piper SDK/CAN raw units: 0.001 degrees. Gripper values are
-    the raw Piper gripper command fields derived from feedback CAN ID 0x2A8.
-    """
+) -> bytes:
+    """Build the compact binary packet used by the real LoRa teleop path."""
 
     if len(joints_raw) != 6:
         raise ValueError(f"expected 6 joint values, got {len(joints_raw)}")
 
     flags = DEADMAN_ENABLED if deadman else 0
+    gripper_angle = 0
+    gripper_effort = 0
+    gripper_code = 0
     if gripper is not None:
         flags |= GRIPPER_PRESENT
-    fields = [
-        PIPER_MAGIC,
-        str(seq),
-        str(sender_time_ms),
-        *(str(int(value)) for value in joints_raw),
-    ]
-    if gripper is not None:
-        fields.extend(
-            [
-                str(int(gripper.get("angle", 0))),
-                str(int(gripper.get("effort", 0))),
-                str(int(gripper.get("code", 0))),
-            ]
-        )
-    fields.append(str(flags))
-    payload = ",".join(fields)
-    return f"{payload},{checksum16(payload)}\n"
+        gripper_angle = int(gripper.get("angle", 0))
+        gripper_effort = int(gripper.get("effort", 0))
+        gripper_code = int(gripper.get("code", 0))
 
-
-def _validated_parts(line: str) -> list[str]:
-    parts = line.strip().split(",")
-    if not parts or parts[0] != PIPER_MAGIC:
-        raise ValueError("missing PIPER header")
-
-    payload = ",".join(parts[:-1])
-    expected = checksum16(payload)
-    received = int(parts[-1])
-    if received != expected:
-        raise ValueError(f"checksum mismatch received={received} expected={expected}")
-    return parts
-
-
-def parse_piper_line(line: str) -> PiperPacket:
-    parts = _validated_parts(line)
-    if len(parts) != 12:
-        raise ValueError(f"expected 12 comma-separated fields, got {len(parts)}")
-
-    return PiperPacket(
-        seq=int(parts[1]),
-        sender_time_ms=int(parts[2]),
-        q_cd=[int(value) for value in parts[3:9]],
-        gripper_p100=int(parts[9]),
-        flags=int(parts[10]),
+    payload = _BINARY_PACKET_WITHOUT_CRC.pack(
+        PIPER_BINARY_MAGIC,
+        flags,
+        int(seq) & 0xFFFFFFFF,
+        int(sender_time_ms) & 0xFFFFFFFF,
+        *(int(value) for value in joints_raw),
+        gripper_angle,
+        gripper_effort & 0xFFFF,
+        gripper_code & 0xFF,
+        0,
     )
+    return payload + struct.pack("<H", crc16_ccitt(payload))
 
 
-def parse_piper_teleop_line(line: str) -> PiperTeleopPacket:
-    parts = _validated_parts(line)
-    if len(parts) == 11:
-        return PiperTeleopPacket(
-            seq=int(parts[1]),
-            sender_time_ms=int(parts[2]),
-            joints_raw=[int(value) for value in parts[3:9]],
-            gripper_angle=0,
-            gripper_effort=0,
-            gripper_code=0,
-            flags=int(parts[9]),
-        )
-    if len(parts) != 14:
-        raise ValueError(f"expected 11 or 14 comma-separated fields, got {len(parts)}")
+def parse_piper_teleop_packet(packet: bytes | bytearray | memoryview) -> PiperTeleopPacket:
+    data = bytes(packet)
+    if len(data) != BINARY_PACKET_SIZE:
+        raise ValueError(f"expected {BINARY_PACKET_SIZE} binary bytes, got {len(data)}")
+    if data[:4] != PIPER_BINARY_MAGIC:
+        raise ValueError("missing PLT1 binary header")
+
+    received_crc = int.from_bytes(data[-2:], byteorder="little", signed=False)
+    expected_crc = crc16_ccitt(data[:-2])
+    if received_crc != expected_crc:
+        raise ValueError(f"binary CRC mismatch received={received_crc} expected={expected_crc}")
+
+    (
+        _magic,
+        flags,
+        seq,
+        sender_time_ms,
+        j1,
+        j2,
+        j3,
+        j4,
+        j5,
+        j6,
+        gripper_angle,
+        gripper_effort,
+        gripper_code,
+        _reserved,
+        _crc,
+    ) = _BINARY_PACKET.unpack(data)
 
     return PiperTeleopPacket(
-        seq=int(parts[1]),
-        sender_time_ms=int(parts[2]),
-        joints_raw=[int(value) for value in parts[3:9]],
-        gripper_angle=int(parts[9]),
-        gripper_effort=int(parts[10]),
-        gripper_code=int(parts[11]),
-        flags=int(parts[12]),
+        seq=seq,
+        sender_time_ms=sender_time_ms,
+        joints_raw=[j1, j2, j3, j4, j5, j6],
+        gripper_angle=gripper_angle,
+        gripper_effort=gripper_effort,
+        gripper_code=gripper_code,
+        flags=flags,
     )
 
 
-def cd_to_degrees(q_cd: list[int]) -> list[float]:
-    return [value / 100.0 for value in q_cd]
+def _prefix_suffix_len(buffer: bytearray) -> int:
+    max_len = min(len(buffer), len(PIPER_BINARY_MAGIC) - 1)
+    for keep in range(max_len, 0, -1):
+        if PIPER_BINARY_MAGIC.startswith(bytes(buffer[-keep:])):
+            return keep
+    return 0
 
 
-def degrees_to_cd(q_deg: list[float]) -> list[int]:
-    if len(q_deg) != 6:
-        raise ValueError(f"expected 6 joint values, got {len(q_deg)}")
-    return [int(round(value * 100.0)) for value in q_deg]
+def extract_piper_teleop_packets(buffer: bytearray) -> list[PiperTeleopPacket]:
+    """Extract complete binary packets from a noisy serial stream."""
 
+    packets: list[PiperTeleopPacket] = []
 
-def cd_to_mdeg(q_cd: list[int]) -> list[int]:
-    if len(q_cd) != 6:
-        raise ValueError(f"expected 6 joint values, got {len(q_cd)}")
-    return [value * 10 for value in q_cd]
+    while buffer:
+        binary_at = buffer.find(PIPER_BINARY_MAGIC)
+        if binary_at == -1:
+            keep = _prefix_suffix_len(buffer)
+            if keep:
+                del buffer[:-keep]
+            else:
+                buffer.clear()
+            break
 
+        if binary_at > 0:
+            del buffer[:binary_at]
+        if len(buffer) < BINARY_PACKET_SIZE:
+            break
 
-def mdeg_to_cd(q_mdeg: list[int]) -> list[int]:
-    if len(q_mdeg) != 6:
-        raise ValueError(f"expected 6 joint values, got {len(q_mdeg)}")
-    return [int(round(value / 10.0)) for value in q_mdeg]
+        packet = bytes(buffer[:BINARY_PACKET_SIZE])
+        try:
+            packets.append(parse_piper_teleop_packet(packet))
+            del buffer[:BINARY_PACKET_SIZE]
+        except ValueError:
+            del buffer[0]
 
+    return packets

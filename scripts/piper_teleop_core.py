@@ -10,10 +10,9 @@ from typing import Protocol
 from piper_lora_protocol import PiperTeleopPacket
 
 
-MASTER_COMMAND_CAN_IDS = {0x151, 0x155, 0x156, 0x157, 0x159}
 MASTER_FEEDBACK_CAN_IDS = {0x2A5, 0x2A6, 0x2A7, 0x2A8}
-MASTER_CAN_IDS = MASTER_COMMAND_CAN_IDS | MASTER_FEEDBACK_CAN_IDS
 RAW_UNITS_PER_DEGREE = 1000
+SEQUENCE_RESET_AFTER_S = 1.0
 JOINT_LIMITS_RAW: tuple[tuple[int, int], ...] = (
     (-150000, 150000),
     (0, 180000),
@@ -44,11 +43,10 @@ def decode_i32_be(data: bytes | bytearray | memoryview) -> int:
 
 
 @dataclass
-class MasterCommandState:
+class MasterFeedbackState:
     joints: list[int | None] = field(default_factory=lambda: [None] * 6)
     joint_updated_at: list[float | None] = field(default_factory=lambda: [None] * 6)
     gripper: dict[str, int] | None = None
-    mode_frame: list[int] | None = None
 
     def has_full_joint_target(self) -> bool:
         return all(value is not None for value in self.joints)
@@ -74,40 +72,7 @@ class MasterCommandState:
         self.joint_updated_at[first_index + 1] = now_s
 
 
-def decode_master_frame(message: CanMessage, state: MasterCommandState) -> bool:
-    arbitration_id = int(message.arbitration_id)
-    data = bytes(message.data)
-    if arbitration_id not in MASTER_COMMAND_CAN_IDS:
-        return False
-
-    if arbitration_id == 0x151 and len(data) == 8:
-        state.mode_frame = list(data)
-        return True
-
-    if arbitration_id == 0x155 and len(data) == 8:
-        state.update_joint_pair(0, decode_i32_be(data[0:4]), decode_i32_be(data[4:8]))
-        return True
-
-    if arbitration_id == 0x156 and len(data) == 8:
-        state.update_joint_pair(2, decode_i32_be(data[0:4]), decode_i32_be(data[4:8]))
-        return True
-
-    if arbitration_id == 0x157 and len(data) == 8:
-        state.update_joint_pair(4, decode_i32_be(data[0:4]), decode_i32_be(data[4:8]))
-        return True
-
-    if arbitration_id == 0x159 and len(data) == 8:
-        state.gripper = {
-            "angle": decode_i32_be(data[0:4]),
-            "effort": int.from_bytes(data[4:6], byteorder="big", signed=False),
-            "code": data[6],
-        }
-        return True
-
-    return False
-
-
-def decode_master_feedback_frame(message: CanMessage, state: MasterCommandState) -> bool:
+def decode_master_feedback_frame(message: CanMessage, state: MasterFeedbackState) -> bool:
     arbitration_id = int(message.arbitration_id)
     data = bytes(message.data)
     if arbitration_id not in MASTER_FEEDBACK_CAN_IDS:
@@ -191,6 +156,12 @@ class SlavePacketTracker:
         self.first_valid_rx_time_s: float | None = None
         self.valid_packet_count = 0
 
+    def reset_sequence(self) -> None:
+        self.last_seq = None
+        self.total_dropped = 0
+        self.first_valid_rx_time_s = None
+        self.valid_packet_count = 0
+
     def process_packet(
         self,
         packet: PiperTeleopPacket,
@@ -205,12 +176,20 @@ class SlavePacketTracker:
             return PacketDecision(accepted=False, reason="deadman=false", sequence=packet.seq)
 
         if self.last_seq is not None and packet.seq <= self.last_seq:
-            return PacketDecision(
-                accepted=False,
-                reason=f"duplicate/out-of-order packet seq={packet.seq} last_seq={self.last_seq}",
-                sequence=packet.seq,
-                total_dropped=self.total_dropped,
+            stale_gap_s = (
+                None
+                if self.last_valid_rx_time_s is None
+                else receiver_time_s - self.last_valid_rx_time_s
             )
+            if stale_gap_s is not None and stale_gap_s > SEQUENCE_RESET_AFTER_S:
+                self.reset_sequence()
+            else:
+                return PacketDecision(
+                    accepted=False,
+                    reason=f"duplicate/out-of-order packet seq={packet.seq} last_seq={self.last_seq}",
+                    sequence=packet.seq,
+                    total_dropped=self.total_dropped,
+                )
 
         dropped = 0
         if self.last_seq is not None and packet.seq > self.last_seq + 1:

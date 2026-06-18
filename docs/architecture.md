@@ -1,8 +1,8 @@
 # Architecture
 
-## Final Real Goal
+## Real System
 
-The final real system is intended to bridge joint targets between two AgileX Piper arms:
+The system bridges live joint targets between two AgileX Piper arms:
 
 ```text
 Master Piper arm
@@ -18,59 +18,42 @@ Master Piper arm
   -> Slave Piper arm
 ```
 
-## Fake Test
+## Responsibilities
 
-The fake transport test proves:
+The ESP32 boards are radio modems. They do not read or write Piper CAN.
 
-```text
-Computer 1 fake packet
-  -> Serial
-  -> Board A
-  -> LoRa
-  -> Board B
-  -> Serial
-  -> Computer 2 fake CAN output
-```
-
-There is no Piper control and no CAN connection in this version. The Python sender generates smooth fake joint targets. Board A forwards valid `PIPER` serial lines over LoRa. Board B validates LoRa packets and forwards valid `PIPER` lines over serial. The Computer 2 receiver validates the packet again and prints what it would send to the slave Piper.
-
-## Real Teleoperation
-
-The real teleoperation scripts keep the ESP32 boards as simple serial radio modems:
-
-```text
 Computer 1:
-  python-can raw master command reader
-  -> raw compact PIPER target packet
-  -> Board A serial
+
+- Reads live SocketCAN feedback frames from the master Piper.
+- Uses `0x2A5`, `0x2A6`, and `0x2A7` for joints 1-6.
+- Uses `0x2A8` for optional gripper feedback.
+- Waits for a fresh full joint set before sending.
+- Writes compact 47-byte binary `PLT1` packets to Board A.
+- Waits for Board A `TX done` before sending another packet.
+
+Board A:
+
+- Reads fixed binary teleop packets from USB serial.
+- Validates magic and CRC.
+- Transmits valid packets over LoRa at 923.2 MHz, BW250, SF7.
+
+Board B:
+
+- Receives LoRa packets.
+- Validates magic and CRC.
+- Writes valid binary packets to USB serial for Computer 2.
+- Displays packet/stale status on the OLED.
 
 Computer 2:
-  Board B serial
-  -> packet validation
-  -> stale/deadman gate
-  -> raw latest-target command
-  -> piper_sdk CAN JointCtrl/GripperCtrl
-```
 
-`scripts/computer1_piper_sender.py` reads raw SocketCAN feedback frames from the master Piper. This follows the physical master pose at script start and avoids replaying a latched old command target:
+- Scans the Board B serial stream for valid binary teleop packets.
+- Rejects corrupt, stale, deadman-off, duplicate, and out-of-order packets.
+- Clamps raw Piper joint targets to known Piper joint limits.
+- Writes the slave Piper with `JointCtrl()` and `GripperCtrl()`.
 
-- `0x2A5`: joints 1 and 2
-- `0x2A6`: joints 3 and 4
-- `0x2A7`: joints 5 and 6
-- `0x2A8`: optional gripper feedback
+## Why Live Feedback Frames Matter
 
-It stores the latest complete target, waits for Board A to report `TX done`, and sends the newest target over LoRa. The sender does not use `piper_sdk`.
-
-`scripts/computer2_piper_receiver.py` validates LoRa packets, drops corrupt packets, rejects deadman-off and out-of-order packets, clamps raw Piper joint targets to known Piper joint limits, and writes the slave Piper with `JointCtrl()` and `GripperCtrl()`. It follows the latest valid target directly.
-
-## Why The ESP32 Boards Stay Simple
-
-The ESP32 boards act as radio modems. They do not understand Piper CAN. This keeps the embedded code small and reduces risk:
-
-- Board A reads a compact ASCII packet from USB serial and transmits it over LoRa.
-- Board B receives a LoRa packet and prints it over USB serial.
-- Both boards validate the checksum so corrupted packets are dropped early.
-- Board B detects stale traffic and displays/prints a fake stop warning.
+The sender follows the physical master pose, not the last command that happened to be present on CAN. That prevents the slave from jumping to an old pose when the script starts after the master has been moved by hand.
 
 ## Safety Behavior
 
