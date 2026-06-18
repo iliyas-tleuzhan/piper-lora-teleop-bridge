@@ -146,13 +146,9 @@ python scripts/computer2_piper_receiver.py --port /dev/ttyACM1 --can can0 --conf
 
 `--confirm MOVE` is required. Without it, the receiver refuses to command the robot.
 
-Useful receiver options:
+Optional receiver check:
 
 - `--dry-run`: validate LoRa packets without connecting to or moving Piper.
-- `--stale-timeout 0.5`: warn and hold the last command if packets stop.
-- `--enable-slew-limit --max-step-deg 3`: optional step limiting. Disabled by default for direct teleop feel.
-- `--disable-on-exit`: disable all motors when the receiver exits.
-- `--speed-percent 100 --follow-mode 0xAD`: default Piper motion settings.
 
 ## Step 6: Start Computer 1
 
@@ -161,23 +157,17 @@ On Computer 1, connected to the master Piper and Board A:
 ```bash
 conda activate piper-lora-teleop
 cd piper-lora-teleop-bridge
-python scripts/computer1_piper_sender.py --port /dev/ttyACM0 --can can0 --rate 5 --deadman
+python scripts/computer1_piper_sender.py --port /dev/ttyACM0 --can can0
 ```
 
-`--deadman` is required. The receiver ignores packets with deadman disabled.
-
-Useful sender options:
-
-- `--rate 5`: LoRa packet rate. Keep this modest; LoRa is low bandwidth.
-- `--verbose-packets`: print every raw packet line sent to Board A.
-- `--can-timeout 0.02`: SocketCAN receive timeout.
+The sender uses a live deadman by default. It also waits for Board A `TX done` before sending the next packet, so it does not build up stale serial data when the radio is busy.
 
 ## Expected Output
 
 Computer 1 should eventually print status like:
 
 ```text
-[MASTER] seq=12 deadman=True deg=[...] gripper={...}
+[MASTER] seq=12 deg=[...] gripper=unchanged
 ```
 
 Computer 2 should print status like:
@@ -188,10 +178,10 @@ Computer 2 should print status like:
 
 If Computer 2 prints no accepted packets:
 
-1. Confirm Computer 1 is running with `--deadman`.
-2. Confirm Board A and Board B are powered and have antennas.
-3. Confirm both ESP32 sketches use `923200000` Hz.
-4. Confirm the serial ports are correct and not open in Arduino Serial Monitor.
+1. Confirm Board A and Board B are powered and have antennas.
+2. Confirm both ESP32 sketches use `923200000` Hz.
+3. Confirm the serial ports are correct and not open in Arduino Serial Monitor.
+4. Confirm Computer 1 sees `0x155`, `0x156`, and `0x157` with `candump can0`.
 
 ## LoRa Settings
 
@@ -213,8 +203,7 @@ Before enabling motion:
 - Master and slave are on separate CAN buses.
 - `candump can0` works on both computers.
 - Computer 2 receiver is started before Computer 1 sender.
-- Computer 1 sender is started with `--deadman`.
-- Start at low LoRa rate such as `--rate 2` or `--rate 5`.
+- Computer 1 sees `0x155`, `0x156`, and `0x157` before you expect motion.
 
 ## Troubleshooting
 

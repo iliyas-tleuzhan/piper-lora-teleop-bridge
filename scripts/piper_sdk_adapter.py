@@ -81,8 +81,8 @@ class PiperArm:
         dh_is_offset: int = 1,
         judge_flag: bool = False,
         can_auto_init: bool = True,
-        sdk_joint_limit: bool = True,
-        sdk_gripper_limit: bool = True,
+        sdk_joint_limit: bool = False,
+        sdk_gripper_limit: bool = False,
     ) -> None:
         C_PiperInterface, LogLevel = _import_sdk()
         kwargs: dict[str, Any] = {
@@ -98,9 +98,11 @@ class PiperArm:
         if LogLevel is not None:
             kwargs["logger_level"] = LogLevel.WARNING
         try:
-            self._piper = C_PiperInterface(**kwargs)
-        except TypeError:
+            # Match the known-good UDP teleop implementation: use the SDK's
+            # default constructor path and avoid SDK-side joint filtering.
             self._piper = C_PiperInterface(can_name)
+        except TypeError:
+            self._piper = C_PiperInterface(**kwargs)
 
     def connect(self) -> None:
         self._piper.ConnectPort()

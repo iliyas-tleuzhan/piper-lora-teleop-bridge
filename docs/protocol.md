@@ -29,6 +29,12 @@ Fields:
 Real teleoperation uses a raw Piper packet in the same `PIPER` envelope:
 
 ```text
+PIPER,<seq>,<time_ms>,<j1_raw>,<j2_raw>,<j3_raw>,<j4_raw>,<j5_raw>,<j6_raw>,<flags>,<checksum>
+```
+
+When the master gripper command changes, the packet includes gripper fields:
+
+```text
 PIPER,<seq>,<time_ms>,<j1_raw>,<j2_raw>,<j3_raw>,<j4_raw>,<j5_raw>,<j6_raw>,<gripper_angle>,<gripper_effort>,<gripper_code>,<flags>,<checksum>
 ```
 
@@ -41,7 +47,7 @@ PIPER,42,123456,10000,20000,-30000,0,5000,-6000,35000,1000,1,3,20049
 Fields:
 
 - `j1_raw` to `j6_raw`: raw Piper joint targets in `0.001 degrees`, decoded directly from master CAN frames `0x155`, `0x156`, and `0x157`.
-- `gripper_angle`: raw gripper travel from CAN frame `0x159`, in `0.001 mm`.
+- `gripper_angle`: optional raw gripper travel from CAN frame `0x159`, in `0.001 mm`.
 - `gripper_effort`: raw gripper effort from CAN frame `0x159`.
 - `gripper_code`: raw gripper command code from CAN frame `0x159`.
 - `flags`: integer bitfield.
@@ -64,7 +70,7 @@ Fields:
 The checksum is calculated over the packet string before the final comma and checksum field:
 
 ```text
-PIPER,<seq>,<time_ms>,<q1_cd>,<q2_cd>,<q3_cd>,<q4_cd>,<q5_cd>,<q6_cd>,<gripper_p100>,<flags>
+PIPER,<seq>,<time_ms>,<...payload fields...>,<flags>
 ```
 
 Algorithm:
@@ -95,13 +101,13 @@ Board B declares stale when no valid LoRa packet has arrived for more than one s
 # STALE: no valid LoRa packet for >1s, fake slave would stop/freeze
 ```
 
-Computer 2 also declares stale when no valid live packet has been read for more than `--stale-timeout`, default `0.5` second. The real receiver warns and holds the last command, matching the UDP teleop reference.
+Computer 2 also declares stale when no valid live packet has been read for more than `0.5` second. The real receiver warns and holds the last command, matching the UDP teleop reference.
 
 ## Rate Limits
 
 LoRa is low-bandwidth. Do not forward raw high-rate CAN frames over LoRa.
 
-For a real Piper LoRa demo, send compact joint targets at 2-5 Hz. Keep packets short and drop corrupted or stale packets.
+The sender is flow-controlled by Board A `TX done`, so it sends the newest target only when the radio is ready. Gripper fields are omitted from normal joint packets unless the gripper command changes.
 
 ## Real Piper Unit Mapping
 

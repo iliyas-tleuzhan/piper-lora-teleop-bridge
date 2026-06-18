@@ -48,7 +48,7 @@ Computer 2:
   Board B serial
   -> packet validation
   -> stale/deadman gate
-  -> optional slew limit
+  -> raw latest-target command
   -> piper_sdk CAN JointCtrl/GripperCtrl
 ```
 
@@ -59,9 +59,9 @@ Computer 2:
 - `0x157`: joints 5 and 6
 - `0x159`: optional gripper command
 
-It stores the latest complete target and sends that target over LoRa at the requested packet rate. The sender does not use `piper_sdk`.
+It stores the latest complete target, waits for Board A to report `TX done`, and sends the newest target over LoRa. The sender does not use `piper_sdk`.
 
-`scripts/computer2_piper_receiver.py` validates LoRa packets, drops corrupt packets, rejects deadman-off and out-of-order packets, clamps raw Piper joint targets to known Piper joint limits, and writes the slave Piper with `JointCtrl()` and `GripperCtrl()`. It follows the latest valid target directly by default, with optional slew limiting available through `--enable-slew-limit`.
+`scripts/computer2_piper_receiver.py` validates LoRa packets, drops corrupt packets, rejects deadman-off and out-of-order packets, clamps raw Piper joint targets to known Piper joint limits, and writes the slave Piper with `JointCtrl()` and `GripperCtrl()`. It follows the latest valid target directly.
 
 ## Why The ESP32 Boards Stay Simple
 
@@ -76,5 +76,5 @@ The ESP32 boards act as radio modems. They do not understand Piper CAN. This kee
 
 - The packet deadman flag must be enabled before the receiver commands the slave.
 - The receiver refuses to move unless started with `--confirm MOVE`.
-- If no valid live packet arrives for more than the receiver `--stale-timeout`, the receiver warns and holds the last command.
+- If no valid live packet arrives for more than the receiver timeout, the receiver warns and holds the last command.
 - `--dry-run` on the receiver validates the real LoRa stream without writing CAN motion commands.

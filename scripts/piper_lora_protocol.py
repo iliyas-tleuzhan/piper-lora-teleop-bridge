@@ -89,20 +89,21 @@ def build_piper_teleop_line(
     flags = DEADMAN_ENABLED if deadman else 0
     if gripper is not None:
         flags |= GRIPPER_PRESENT
-    gripper_angle = 0 if gripper is None else int(gripper.get("angle", 0))
-    gripper_effort = 0 if gripper is None else int(gripper.get("effort", 0))
-    gripper_code = 0 if gripper is None else int(gripper.get("code", 0))
-
     fields = [
         PIPER_MAGIC,
         str(seq),
         str(sender_time_ms),
         *(str(int(value)) for value in joints_raw),
-        str(gripper_angle),
-        str(gripper_effort),
-        str(gripper_code),
-        str(flags),
     ]
+    if gripper is not None:
+        fields.extend(
+            [
+                str(int(gripper.get("angle", 0))),
+                str(int(gripper.get("effort", 0))),
+                str(int(gripper.get("code", 0))),
+            ]
+        )
+    fields.append(str(flags))
     payload = ",".join(fields)
     return f"{payload},{checksum16(payload)}\n"
 
@@ -136,8 +137,18 @@ def parse_piper_line(line: str) -> PiperPacket:
 
 def parse_piper_teleop_line(line: str) -> PiperTeleopPacket:
     parts = _validated_parts(line)
+    if len(parts) == 11:
+        return PiperTeleopPacket(
+            seq=int(parts[1]),
+            sender_time_ms=int(parts[2]),
+            joints_raw=[int(value) for value in parts[3:9]],
+            gripper_angle=0,
+            gripper_effort=0,
+            gripper_code=0,
+            flags=int(parts[9]),
+        )
     if len(parts) != 14:
-        raise ValueError(f"expected 14 comma-separated fields, got {len(parts)}")
+        raise ValueError(f"expected 11 or 14 comma-separated fields, got {len(parts)}")
 
     return PiperTeleopPacket(
         seq=int(parts[1]),

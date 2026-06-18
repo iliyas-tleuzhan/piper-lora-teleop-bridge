@@ -20,6 +20,14 @@ from piper_teleop_core import (
     raw_to_deg,
 )
 
+DEFAULT_SEND_RATE_HZ = 8.0
+SERIAL_BAUD = 115200
+CAN_RECV_TIMEOUT_S = 0.005
+STATUS_RATE_HZ = 2.0
+STARTUP_DELAY_S = 3.0
+BOARD_TX_RECOVERY_S = 0.6
+GRIPPER_REFRESH_S = 1.0
+
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
@@ -29,32 +37,10 @@ def parse_args() -> argparse.Namespace:
         )
     )
     parser.add_argument("--port", required=True, help="Board A serial port, for example /dev/ttyACM0")
-    parser.add_argument("--baud", type=int, default=115200, help="Board A serial baud rate")
     parser.add_argument("--can", default="can0", help="Master Piper SocketCAN interface")
-    parser.add_argument("--rate", type=float, default=5.0, help="LoRa target packets per second")
-    parser.add_argument("--deadman", action="store_true", help="Set packet deadman=true")
-    parser.add_argument(
-        "--can-timeout",
-        type=float,
-        default=0.02,
-        help="SocketCAN receive timeout in seconds",
-    )
-    parser.add_argument(
-        "--status-rate",
-        type=float,
-        default=2.0,
-        help="Human-readable status print rate in Hz",
-    )
-    parser.add_argument(
-        "--startup-delay",
-        type=float,
-        default=3.0,
-        help="Seconds to wait after opening serial before sending.",
-    )
-    parser.add_argument("--duration", type=float, default=None, help="Optional run time in seconds")
-    parser.add_argument("--write-timeout", type=float, default=None, help="Serial write timeout")
-    parser.add_argument("--no-flush", action="store_true", help="Do not serial flush after each packet")
-    parser.add_argument("--verbose-packets", action="store_true", help="Print every LoRa packet line")
+    parser.add_argument("--rate", type=float, default=DEFAULT_SEND_RATE_HZ, help=argparse.SUPPRESS)
+    parser.add_argument("--deadman", action="store_true", default=True, help=argparse.SUPPRESS)
+    parser.add_argument("--baud", type=int, default=SERIAL_BAUD, help=argparse.SUPPRESS)
     return parser.parse_args()
 
 
@@ -62,27 +48,21 @@ def validate_args(args: argparse.Namespace) -> int:
     if args.rate <= 0:
         print("--rate must be greater than 0", file=sys.stderr)
         return 2
-    if args.can_timeout < 0:
-        print("--can-timeout must be 0 or greater", file=sys.stderr)
-        return 2
-    if args.status_rate < 0:
-        print("--status-rate must be 0 or greater", file=sys.stderr)
-        return 2
-    if args.startup_delay < 0:
-        print("--startup-delay must be 0 or greater", file=sys.stderr)
-        return 2
-    if args.write_timeout is not None and args.write_timeout < 0:
-        print("--write-timeout must be 0 or greater", file=sys.stderr)
-        return 2
     return 0
 
 
-def drain_board_debug(ser: serial.Serial, stop_event: threading.Event) -> None:
+def drain_board_debug(
+    ser: serial.Serial,
+    stop_event: threading.Event,
+    tx_ready: threading.Event,
+) -> None:
     while not stop_event.is_set():
         try:
-            ser.readline()
+            text = ser.readline().decode("ascii", errors="replace").strip()
         except serial.SerialException:
             return
+        if text in {"TX done", "TX timeout"}:
+            tx_ready.set()
 
 
 def open_can_bus(can_interface: str):
@@ -103,6 +83,8 @@ def main() -> int:
 
     stop_requested = False
     reader_stop = threading.Event()
+    tx_ready = threading.Event()
+    tx_ready.set()
 
     def request_stop(_signum: int, _frame: object) -> None:
         nonlocal stop_requested
@@ -119,9 +101,12 @@ def main() -> int:
     period = 1.0 / args.rate
     seq = 0
     state = MasterCommandState()
-    status = RateLimitedPrinter(args.status_rate)
+    status = RateLimitedPrinter(STATUS_RATE_HZ)
     start_time = time.monotonic()
     next_send = start_time
+    last_send_at = 0.0
+    last_sent_gripper: dict[str, int] | None = None
+    last_gripper_sent_at = 0.0
 
     print(f"Opening Board A serial {args.port} at {args.baud} baud")
     try:
@@ -129,29 +114,26 @@ def main() -> int:
             args.port,
             args.baud,
             timeout=0.2,
-            write_timeout=args.write_timeout,
+            write_timeout=None,
         ) as ser:
             reader = threading.Thread(
                 target=drain_board_debug,
-                args=(ser, reader_stop),
+                args=(ser, reader_stop, tx_ready),
                 daemon=True,
             )
             reader.start()
-            print(f"Waiting {args.startup_delay:.1f} seconds for ESP32 serial startup...")
-            time.sleep(args.startup_delay)
+            print(f"Waiting {STARTUP_DELAY_S:.1f} seconds for ESP32 serial startup...")
+            time.sleep(STARTUP_DELAY_S)
 
             print(f"[MASTER] Reading Piper command CAN frames from {args.can}")
             print(f"[MASTER] Sending raw LoRa teleop packets to {args.port} at {args.rate:.2f} Hz")
-            print(f"[MASTER] deadman={args.deadman}; receiver will ignore packets unless this is true")
             print("[MASTER] Waiting for complete 0x155/0x156/0x157 joint target set")
 
             while not stop_requested:
                 now = time.monotonic()
-                if args.duration is not None and now - start_time >= args.duration:
-                    break
 
                 try:
-                    message = bus.recv(timeout=args.can_timeout)
+                    message = bus.recv(timeout=CAN_RECV_TIMEOUT_S)
                 except OSError as exc:
                     print(f"CAN read failed on {args.can}: {exc}", file=sys.stderr)
                     return 1
@@ -163,35 +145,50 @@ def main() -> int:
                 if now < next_send:
                     continue
 
+                if not tx_ready.is_set():
+                    if now - last_send_at > BOARD_TX_RECOVERY_S:
+                        tx_ready.set()
+                    else:
+                        continue
+
                 if not state.has_full_joint_target():
                     status.print("[MASTER] Waiting for complete joint target frames")
                     next_send = now + period
                     continue
 
                 sender_time_ms = int((now - start_time) * 1000.0)
+                gripper_to_send = None
+                if state.gripper is not None:
+                    gripper_changed = state.gripper != last_sent_gripper
+                    gripper_refresh_due = now - last_gripper_sent_at >= GRIPPER_REFRESH_S
+                    if gripper_changed or gripper_refresh_due:
+                        gripper_to_send = state.gripper
+
                 line = build_piper_teleop_line(
                     seq,
                     sender_time_ms,
                     state.joints_raw(),
-                    deadman=args.deadman,
-                    gripper=state.gripper,
+                    deadman=True,
+                    gripper=gripper_to_send,
                 )
                 try:
+                    tx_ready.clear()
                     ser.write(line.encode("ascii"))
-                    if not args.no_flush:
-                        ser.flush()
+                    ser.flush()
                 except serial.SerialTimeoutException as exc:
                     print(f"Serial write timed out: {exc}", file=sys.stderr)
                     return 1
 
-                if args.verbose_packets:
-                    print(f"[MASTER] TX {line.strip()}", flush=True)
-                else:
-                    status.print(
-                        f"[MASTER] seq={seq} deadman={args.deadman} "
-                        f"deg={[round(raw_to_deg(value), 3) for value in state.joints_raw()]} "
-                        f"gripper={state.gripper}"
-                    )
+                last_send_at = now
+                if gripper_to_send is not None:
+                    last_sent_gripper = dict(gripper_to_send)
+                    last_gripper_sent_at = now
+
+                status.print(
+                    f"[MASTER] seq={seq} "
+                    f"deg={[round(raw_to_deg(value), 3) for value in state.joints_raw()]} "
+                    f"gripper={'sent' if gripper_to_send is not None else 'unchanged'}"
+                )
 
                 seq += 1
                 next_send = now + period
