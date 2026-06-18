@@ -230,12 +230,26 @@ Useful options:
 - `computer1_piper_sender.py --source control` reads master-arm control frames. This is the default and is usually what you want for a Piper master arm in master/slave mode.
 - `computer1_piper_sender.py --source feedback` reads feedback frames instead.
 - `computer1_piper_sender.py --configure-master` sends `MasterSlaveConfig(0xFA, 0, 0, 0)` before reading.
+- `computer1_piper_sender.py --can-ok-timeout 10` waits up to 10 seconds for the Piper SDK CAN reader to become healthy, then exits.
+- `computer1_piper_sender.py --ignore-can-ok` bypasses the SDK `isOk()` guard. Use this only after verifying the script is reading real Piper joint values.
 - `computer2_piper_receiver.py --configure-slave` sends `MasterSlaveConfig(0xFC, 0, 0, 0)` before controlling.
 - `computer2_piper_receiver.py --dry-run` validates packets and prints targets without writing Piper CAN motion commands.
 - `computer2_piper_receiver.py --smoothing 0.35 --command-rate 20` controls interpolation between low-rate LoRa updates.
 - `computer2_piper_receiver.py --no-disable-on-exit` leaves the arm enabled when the script exits. The default is to disable on exit.
 
 If packets become stale for more than `--stale-timeout` seconds, or the deadman flag is off, the real receiver stops sending commands and disables the slave arm by default.
+
+If Computer 1 prints `Piper SDK CAN reader is not OK yet`, no LoRa packets are being sent. Check that `can0` is up at `1000000` bitrate and that the master arm is publishing the frame type selected by `--source`. For a master arm, try:
+
+```bash
+python scripts/computer1_piper_sender.py --port /dev/ttyACM0 --can can0 --rate 1 --configure-master
+```
+
+For a normal/slave arm used as a source, try:
+
+```bash
+python scripts/computer1_piper_sender.py --port /dev/ttyACM0 --can can0 --rate 1 --source feedback
+```
 
 ## LoRa Settings
 
