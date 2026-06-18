@@ -69,6 +69,17 @@ The sender refuses to transmit until it has a fresh full joint set from one of t
 
 Board B declares stale when no valid LoRa packet has arrived for more than one second. Computer 2 warns when no valid live packet has been read for more than `0.5` second and holds the last command.
 
+## Startup And Smoothing
+
+Computer 2 reads the slave arm's current joint feedback before it allows motion. The first valid master packet establishes a relative baseline, so the first packet cannot make the slave jump to an old absolute command target.
+
+After startup, Computer 2 filters targets before `JointCtrl()`:
+
+- Tiny command changes are ignored to avoid buzz.
+- Each packet is low-pass filtered.
+- Per-packet joint steps are limited.
+- A sudden large source-target jump causes a rebase instead of a jerk.
+
 ## Rate Limits
 
 LoRa is low-bandwidth. Do not forward raw high-rate CAN frames over LoRa.

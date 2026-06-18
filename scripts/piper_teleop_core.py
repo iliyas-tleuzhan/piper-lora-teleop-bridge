@@ -14,13 +14,17 @@ MASTER_COMMAND_CAN_IDS = {0x151, 0x155, 0x156, 0x157, 0x159}
 MASTER_FEEDBACK_CAN_IDS = {0x2A5, 0x2A6, 0x2A7, 0x2A8}
 RAW_UNITS_PER_DEGREE = 1000
 SEQUENCE_RESET_AFTER_S = 1.0
+STARTUP_SOURCE_REBASE_RAW = 20000
+COMMAND_DEADBAND_RAW = 50
+SMOOTHING_ALPHA = 0.45
+MAX_STEP_RAW_PER_PACKET: tuple[int, ...] = (5000, 5000, 5000, 6000, 6000, 8000)
 JOINT_LIMITS_RAW: tuple[tuple[int, int], ...] = (
     (-150000, 150000),
     (0, 180000),
     (-170000, 0),
     (-100000, 100000),
     (-70000, 70000),
-    (-120000, 120000),
+    (-170000, 170000),
 )
 
 
@@ -169,6 +173,105 @@ def limit_step_raw(current: list[int], target: list[int], max_step_raw: int) -> 
     return next_joints
 
 
+def max_abs_delta_raw(first: list[int], second: list[int]) -> int:
+    validate_joints_raw(first)
+    validate_joints_raw(second)
+    return max(abs(int(a) - int(b)) for a, b in zip(first, second, strict=True))
+
+
+def smooth_step_raw(current: list[int], target: list[int]) -> list[int]:
+    validate_joints_raw(current)
+    validate_joints_raw(target)
+    next_joints: list[int] = []
+    for current_value, target_value, max_step_raw in zip(
+        current,
+        target,
+        MAX_STEP_RAW_PER_PACKET,
+        strict=True,
+    ):
+        delta = int(target_value) - int(current_value)
+        if abs(delta) <= COMMAND_DEADBAND_RAW:
+            next_joints.append(int(current_value))
+            continue
+        step = int(round(delta * SMOOTHING_ALPHA))
+        if step == 0:
+            step = 1 if delta > 0 else -1
+        step = max(-max_step_raw, min(max_step_raw, step))
+        next_joints.append(int(current_value) + step)
+    return clamp_joints_raw(next_joints)
+
+
+@dataclass(frozen=True)
+class MotionFilterDecision:
+    command_joints: list[int]
+    adjusted_target_joints: list[int]
+    initialized: bool
+    rebased: bool
+    source_jump_raw: int
+
+
+class SlaveMotionFilter:
+    """Relative startup and smoothing filter for slave joint commands."""
+
+    def __init__(self, initial_slave_joints: list[int] | None = None) -> None:
+        self.commanded_joints = (
+            clamp_joints_raw(initial_slave_joints) if initial_slave_joints is not None else None
+        )
+        self.base_slave_joints: list[int] | None = None
+        self.base_source_joints: list[int] | None = None
+        self.last_source_joints: list[int] | None = None
+
+    def update(self, source_joints: list[int]) -> MotionFilterDecision:
+        source = clamp_joints_raw(source_joints)
+        initialized = self.base_source_joints is None
+        rebased = False
+        source_jump_raw = 0
+
+        if self.commanded_joints is None:
+            self.commanded_joints = list(source)
+
+        if self.base_source_joints is None or self.base_slave_joints is None:
+            self.base_source_joints = list(source)
+            self.base_slave_joints = list(self.commanded_joints)
+            self.last_source_joints = list(source)
+            return MotionFilterDecision(
+                command_joints=list(self.commanded_joints),
+                adjusted_target_joints=list(self.commanded_joints),
+                initialized=True,
+                rebased=False,
+                source_jump_raw=0,
+            )
+
+        if self.last_source_joints is not None:
+            source_jump_raw = max_abs_delta_raw(self.last_source_joints, source)
+            if source_jump_raw > STARTUP_SOURCE_REBASE_RAW:
+                self.base_source_joints = list(source)
+                self.base_slave_joints = list(self.commanded_joints)
+                rebased = True
+
+        adjusted_target = clamp_joints_raw(
+            [
+                int(base_slave) + int(current_source) - int(base_source)
+                for base_slave, current_source, base_source in zip(
+                    self.base_slave_joints,
+                    source,
+                    self.base_source_joints,
+                    strict=True,
+                )
+            ]
+        )
+        self.commanded_joints = smooth_step_raw(self.commanded_joints, adjusted_target)
+        self.last_source_joints = list(source)
+
+        return MotionFilterDecision(
+            command_joints=list(self.commanded_joints),
+            adjusted_target_joints=adjusted_target,
+            initialized=initialized,
+            rebased=rebased,
+            source_jump_raw=source_jump_raw,
+        )
+
+
 @dataclass(frozen=True)
 class PacketDecision:
     accepted: bool
@@ -206,6 +309,14 @@ class SlavePacketTracker:
             target_joints = clamp_joints_raw(packet.joints_raw)
         except (TypeError, ValueError) as exc:
             return PacketDecision(accepted=False, reason=f"malformed packet: {exc}")
+
+        warning = None
+        if target_joints != packet.joints_raw:
+            warning = (
+                "joint target clamped "
+                f"raw_deg={[round(raw_to_deg(value), 3) for value in packet.joints_raw]} "
+                f"clamped_deg={[round(raw_to_deg(value), 3) for value in target_joints]}"
+            )
 
         if not packet.deadman:
             return PacketDecision(accepted=False, reason="deadman=false", sequence=packet.seq)
@@ -247,6 +358,7 @@ class SlavePacketTracker:
 
         return PacketDecision(
             accepted=True,
+            warning=warning,
             target_joints=target_joints,
             gripper=gripper,
             sequence=packet.seq,

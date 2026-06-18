@@ -154,6 +154,8 @@ Optional receiver check:
 
 - `--dry-run`: validate LoRa packets without connecting to or moving Piper.
 
+At startup the receiver reads the slave arm's current joint feedback, commands that current pose once, and uses the first incoming master target only as a relative baseline. This prevents the slave from jumping to an old command-frame pose when Computer 1 starts.
+
 ## Step 6: Start Computer 1
 
 Before starting, put the master and slave arms in similar safe poses.
@@ -180,6 +182,8 @@ Computer 1 should print:
 Computer 2 should print:
 
 ```text
+[SLAVE] Startup pose locked at [...] deg
+[SLAVE] startup sync: holding current slave pose and using incoming target as relative baseline
 [SLAVE] accepted seq=12 dropped=0 total_dropped=0 cmd_rate=...
 ```
 
@@ -216,6 +220,7 @@ Before enabling motion:
 - `candump can0` works on both computers.
 - Computer 2 receiver is started before Computer 1 sender.
 - Computer 1 sees either `0x2A5/0x2A6/0x2A7` or `0x155/0x156/0x157` before you expect motion.
+- Computer 2 prints `Startup pose locked` before Computer 1 starts sending.
 
 ## Troubleshooting
 
@@ -247,6 +252,14 @@ candump can0
 ```
 
 Look for either `0x2A5/0x2A6/0x2A7` or `0x155/0x156/0x157`. If both sets are missing, the sender cannot build a complete teleop target.
+
+Jitter or vibration:
+
+The receiver filters incoming targets before calling `JointCtrl()`. If vibration remains, check that only one Computer 1 sender is running and that Board B is not repeatedly disconnecting.
+
+Wrist roll stops early:
+
+The bridge allows joint 6 commands up to `-170` to `+170` degrees. If the wrist still stops earlier, the Piper motor angle limit stored in the arm firmware is probably lower than that.
 
 Serial port busy:
 

@@ -11,6 +11,7 @@ from typing import Any
 class PiperState:
     q_mdeg: list[int]
     gripper_um: int
+    joint_hz: float | None = None
 
 
 class PiperSdkUnavailable(RuntimeError):
@@ -64,6 +65,16 @@ def _field(obj: Any, names: tuple[str, ...]) -> int:
         f"none of these fields exist on {type(obj).__name__}: {names}. "
         f"Available public fields: {fields}"
     )
+
+
+def _optional_float_field(obj: Any, names: tuple[str, ...]) -> float | None:
+    for name in names:
+        if hasattr(obj, name):
+            try:
+                return float(getattr(obj, name))
+            except (TypeError, ValueError):
+                return None
+    return None
 
 
 def _joint_fields(obj: Any) -> list[int]:
@@ -170,8 +181,9 @@ class PiperArm:
         )
 
     def read_feedback_state(self) -> PiperState:
+        joint_message = _message_from_sdk_result(self._piper.GetArmJointMsgs())
         joints = _unwrap_message(
-            _message_from_sdk_result(self._piper.GetArmJointMsgs()),
+            joint_message,
             ("joint_state", "arm_joint_feedback", "joint_ctrl", "arm_joint_ctrl"),
         )
         gripper = _unwrap_message(
@@ -181,6 +193,19 @@ class PiperArm:
         return PiperState(
             q_mdeg=_joint_fields(joints),
             gripper_um=max(0, _field(gripper, ("grippers_angle", "gripper_angle"))),
+            joint_hz=_optional_float_field(joint_message, ("Hz", "hz")),
+        )
+
+    def read_joint_feedback_state(self) -> PiperState:
+        joint_message = _message_from_sdk_result(self._piper.GetArmJointMsgs())
+        joints = _unwrap_message(
+            joint_message,
+            ("joint_state", "arm_joint_feedback", "joint_ctrl", "arm_joint_ctrl"),
+        )
+        return PiperState(
+            q_mdeg=_joint_fields(joints),
+            gripper_um=0,
+            joint_hz=_optional_float_field(joint_message, ("Hz", "hz")),
         )
 
     def write_state(self, state: PiperState, *, gripper_effort: int, dry_run: bool) -> None:

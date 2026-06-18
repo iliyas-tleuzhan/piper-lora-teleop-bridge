@@ -49,6 +49,10 @@ Computer 2:
 
 - Scans the Board B serial stream for valid binary teleop packets.
 - Rejects corrupt, stale, deadman-off, duplicate, and out-of-order packets.
+- Reads slave joint feedback at startup and locks the initial slave pose.
+- Treats the first incoming master target as a relative baseline instead of an immediate absolute command.
+- Rebases if the source target jumps suddenly, preventing a single stale packet from jerking the slave.
+- Smooths and step-limits commands before writing CAN.
 - Clamps raw Piper joint targets to known Piper joint limits.
 - Writes the slave Piper with `JointCtrl()` and `GripperCtrl()`.
 
@@ -60,5 +64,6 @@ Different Piper setups expose different useful master-side frames. The sender us
 
 - The packet deadman flag must be enabled before the receiver commands the slave.
 - The receiver refuses to move unless started with `--confirm MOVE`.
+- The receiver refuses to start real motion if it cannot read live slave joint feedback.
 - If no valid live packet arrives for more than the receiver timeout, the receiver warns and holds the last command.
 - `--dry-run` on the receiver validates the real LoRa stream without writing CAN motion commands.

@@ -123,8 +123,22 @@ If only gripper-related frames change, the slave will only appear to follow the 
 
 ## Slave Jumps To An Old Pose On Startup
 
-Start with both arms in similar safe poses and start Computer 2 before Computer 1. If the slave moves to an unexpected previous target, stop both scripts, power-cycle or reset both ESP32 boards, and restart from Computer 2. Confirm you pulled the latest repo on Computer 1 and that the sender prints:
+Start with both arms in similar safe poses and start Computer 2 before Computer 1. The current receiver should print `Startup pose locked` and then use the first incoming master target as a relative baseline, so the first packet should not move the slave.
+
+If the slave still moves to an unexpected previous target, stop both scripts, power-cycle or reset both ESP32 boards, and restart from Computer 2. Confirm you pulled the latest repo on both computers and that the sender prints:
 
 ```text
 [MASTER] Waiting for 0x2A5/0x2A6/0x2A7 feedback, or UDP-compatible 0x155/0x156/0x157 command frames
 ```
+
+## Jitter Or Vibration
+
+The receiver smooths incoming targets before writing `JointCtrl()`. If vibration remains:
+
+- Confirm only one Computer 1 sender is running.
+- Confirm Board B is not repeatedly disconnecting or reopening.
+- Confirm Computer 2 logs `cmd_rate` near the sender rate instead of bursts with many dropped packets.
+
+## Wrist Roll Stops Early
+
+The bridge software allows joint 6 from `-170` to `+170` degrees. If it still stops earlier, read or reset the Piper motor angle limit in the arm firmware; the firmware can enforce a smaller joint 6 range regardless of what the bridge sends.

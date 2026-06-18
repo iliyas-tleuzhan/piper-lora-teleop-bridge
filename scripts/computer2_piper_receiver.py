@@ -13,6 +13,7 @@ from piper_lora_protocol import PiperTeleopPacket, extract_piper_teleop_packets
 from piper_sdk_adapter import PiperArm, PiperSdkUnavailable
 from piper_teleop_core import (
     RateLimitedPrinter,
+    SlaveMotionFilter,
     SlavePacketTracker,
     clamp_joints_raw,
     raw_to_deg,
@@ -29,6 +30,8 @@ MOVE_MODE = 0x01
 SPEED_PERCENT = 100
 FOLLOW_MODE = 0xAD
 GRIPPER_DEFAULT_EFFORT = 1000
+INITIAL_FEEDBACK_TIMEOUT_S = 3.0
+FEEDBACK_POLL_S = 0.05
 
 
 def parse_args() -> argparse.Namespace:
@@ -69,12 +72,34 @@ def warn_if_receiver_timeout(
     status.print(f"[SLAVE] No valid packets for {idle_text:.2f}s; holding last command")
 
 
-def connect_piper(args: argparse.Namespace) -> PiperArm | None:
+def wait_for_initial_feedback(arm: PiperArm) -> list[int]:
+    deadline = time.monotonic() + INITIAL_FEEDBACK_TIMEOUT_S
+    last_error: Exception | None = None
+
+    while time.monotonic() < deadline:
+        try:
+            state = arm.read_joint_feedback_state()
+        except (AttributeError, RuntimeError, OSError, ValueError) as exc:
+            last_error = exc
+            time.sleep(FEEDBACK_POLL_S)
+            continue
+
+        if state.joint_hz is None or state.joint_hz > 0.0:
+            return clamp_joints_raw(list(state.q_mdeg))
+        time.sleep(FEEDBACK_POLL_S)
+
+    if last_error is not None:
+        raise RuntimeError(f"no live slave joint feedback: {last_error}") from last_error
+    raise RuntimeError("no live slave joint feedback; refusing to enable motion")
+
+
+def connect_piper(args: argparse.Namespace) -> tuple[PiperArm | None, list[int] | None]:
     if args.dry_run:
-        return None
+        return None, None
 
     arm = PiperArm(args.can)
     arm.connect()
+    initial_joints = wait_for_initial_feedback(arm)
     arm.enable_all()
     arm.configure_motion(
         control_mode=CONTROL_MODE,
@@ -82,7 +107,8 @@ def connect_piper(args: argparse.Namespace) -> PiperArm | None:
         speed_percent=SPEED_PERCENT,
         follow_mode=FOLLOW_MODE,
     )
-    return arm
+    arm.write_joints_raw(initial_joints, dry_run=False)
+    return arm, initial_joints
 
 
 def open_board_serial(port: str, baud: int) -> serial.Serial:
@@ -96,6 +122,7 @@ def handle_packet(
     *,
     packet: PiperTeleopPacket,
     tracker: SlavePacketTracker,
+    motion_filter: SlaveMotionFilter,
     status: RateLimitedPrinter,
     arm: PiperArm | None,
     args: argparse.Namespace,
@@ -114,7 +141,21 @@ def handle_packet(
         status.print("[SLAVE] Ignoring packet: missing joints")
         return
 
-    next_joints = clamp_joints_raw(target_joints)
+    motion = motion_filter.update(target_joints)
+    next_joints = motion.command_joints
+
+    if motion.initialized:
+        status.print(
+            "[SLAVE] startup sync: holding current slave pose and using incoming target "
+            "as relative baseline",
+            force=True,
+        )
+    elif motion.rebased:
+        status.print(
+            "[SLAVE] source target jumped "
+            f"{raw_to_deg(motion.source_jump_raw):.1f}deg in one packet; rebasing to prevent jerk",
+            force=True,
+        )
 
     if arm is not None:
         arm.write_joints_raw(next_joints, dry_run=args.dry_run)
@@ -132,6 +173,7 @@ def handle_packet(
         f"dropped={decision.dropped} total_dropped={decision.total_dropped} "
         f"cmd_rate={command_rate_text} "
         f"target_deg={[round(raw_to_deg(value), 3) for value in target_joints]} "
+        f"filtered_target_deg={[round(raw_to_deg(value), 3) for value in motion.adjusted_target_joints]} "
         f"cmd_deg={[round(raw_to_deg(value), 3) for value in next_joints]} "
         f"gripper={decision.gripper}"
     )
@@ -146,15 +188,21 @@ def main() -> int:
     tracker = SlavePacketTracker()
 
     try:
-        arm = connect_piper(args)
+        arm, initial_joints = connect_piper(args)
     except (PiperSdkUnavailable, RuntimeError, OSError, AttributeError) as exc:
         print(f"Piper CAN setup failed: {exc}", file=sys.stderr)
         return 1
 
     if args.dry_run:
         print("[SLAVE] dry-run: not connecting to Piper and not writing CAN commands")
+        motion_filter = SlaveMotionFilter()
     else:
         print(f"[SLAVE] Arm enabled on {args.can}; motion mode configured")
+        print(
+            "[SLAVE] Startup pose locked at "
+            f"{[round(raw_to_deg(value), 3) for value in initial_joints or []]} deg"
+        )
+        motion_filter = SlaveMotionFilter(initial_joints)
 
     try:
         while True:
@@ -197,6 +245,7 @@ def main() -> int:
                             handle_packet(
                                 packet=packet,
                                 tracker=tracker,
+                                motion_filter=motion_filter,
                                 status=status,
                                 arm=arm,
                                 args=args,
