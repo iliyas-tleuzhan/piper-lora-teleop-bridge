@@ -142,4 +142,16 @@ The receiver tracks the master's absolute raw joint targets after startup. If mo
 
 ## Wrist Roll Stops Early
 
-The bridge software allows joint 6 from `-170` to `+170` degrees. If it still stops earlier, read or reset the Piper motor angle limit in the arm firmware; the firmware can enforce a smaller joint 6 range regardless of what the bridge sends.
+The bridge software allows joint 6 from `-170` to `+170` degrees. If it still stops earlier, read the arm firmware limits:
+
+```bash
+python scripts/piper_configure_motor_limits.py --can can0
+```
+
+If the two arms report different limits, apply the same profile on both arms:
+
+```bash
+python scripts/piper_configure_motor_limits.py --can can0 --confirm WRITE_LIMITS
+```
+
+Power-cycle both arms after writing limits. If the firmware rejects the wider joint 6 range or reports angle-limit errors, keep both arms on the same lower reported range.

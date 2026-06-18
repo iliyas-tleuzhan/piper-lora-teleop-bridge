@@ -10,6 +10,8 @@ Computer 1 -> USB Serial -> ESP32 Board A -> LoRa -> ESP32 Board B -> USB Serial
 
 The ESP32 boards are simple serial LoRa modems. They do not understand Piper CAN. Computer 1 reads master Piper SocketCAN target frames, sends compact 47-byte binary `PLT1` packets over LoRa, and Computer 2 validates those packets before commanding the slave Piper with `piper_sdk`.
 
+For the short day-to-day runbook, see [docs/operation.md](docs/operation.md).
+
 ## Hardware
 
 Use two separate Piper CAN buses:
@@ -97,7 +99,60 @@ If those are not present, the sender uses the same command IDs as the working UD
 
 If Computer 1 prints `Waiting for complete joint frames`, run `candump can0` and verify either `0x2A5/0x2A6/0x2A7` or `0x155/0x156/0x157` are present.
 
-## Step 3: Upload ESP32 Firmware
+## Step 3: Match Piper Motor Limits
+
+Run this on both Piper computers before serious teleoperation testing. First read the current firmware limits:
+
+```bash
+python scripts/piper_configure_motor_limits.py --can can0
+```
+
+The bridge uses this full-motion teleop profile:
+
+| Joint | Min deg | Max deg | Max speed |
+| --- | ---: | ---: | ---: |
+| J1 | -150 | 150 | 3.0 rad/s |
+| J2 | 0 | 180 | 3.0 rad/s |
+| J3 | -170 | 0 | 3.0 rad/s |
+| J4 | -100 | 100 | 3.0 rad/s |
+| J5 | -70 | 70 | 3.0 rad/s |
+| J6 | -170 | 170 | 3.0 rad/s |
+
+If either arm reports different firmware limits, apply the same profile to that arm:
+
+```bash
+python scripts/piper_configure_motor_limits.py --can can0 --confirm WRITE_LIMITS
+```
+
+Do this once on the master arm computer and once on the slave arm computer. The command writes persistent driver settings, so power-cycle both arms afterwards.
+
+The official SDK `JointCtrl()` documentation still lists joint 6 as `-120` to `+120` degrees, but the current SDK motor-limit demo writes joint 6 as `-170` to `+170` degrees. This repo follows the writable SDK demo profile so both arms can use the same available wrist-roll range. If your arm firmware rejects this or reports angle-limit errors, use the read command above and keep both arms on the same lower reported range.
+
+## Step 4: Optional Zero Calibration
+
+Use this only if both arms have matching limits but still hold slightly different physical poses for the same joint angles. Zero calibration writes persistent motor calibration.
+
+1. Put both arms in the same physical zero/neutral reference pose. Do not use a random comfortable pose; this pose becomes the firmware zero.
+2. Support the arm before disabling any joint.
+3. Run the guided script on one arm at a time:
+
+   ```bash
+   python scripts/piper_set_zero_guided.py --can can0 --confirm SET_ZERO
+   ```
+
+4. Repeat the same procedure on the other arm.
+5. Power-cycle both arms.
+6. Recheck that the same physical pose produces the same feedback angles on both arms.
+
+If only one joint is visibly offset, calibrate just that joint:
+
+```bash
+python scripts/piper_set_zero_guided.py --can can0 --joint 6 --confirm SET_ZERO
+```
+
+Zero calibration can reduce static offsets between arms. It will not fix packet loss, LoRa latency, loose hardware, gravity sag, or a sender that is using stale command frames.
+
+## Step 5: Upload ESP32 Firmware
 
 Arduino IDE setup:
 
@@ -128,7 +183,7 @@ Upload order:
 
 Board A should show `Board A` / `Serial->LoRa`. Board B should show stale until packets arrive.
 
-## Step 4: Find ESP32 Serial Ports
+## Step 6: Find ESP32 Serial Ports
 
 Run on each computer:
 
@@ -138,7 +193,7 @@ python scripts/list_serial_ports.py
 
 Use the actual ports printed by the script. On separate Linux computers, each board is often `/dev/ttyACM0`. Close Arduino Serial Monitor before running Python.
 
-## Step 5: Start Computer 2 First
+## Step 7: Start Computer 2 First
 
 On Computer 2, connected to the slave Piper and Board B:
 
@@ -156,7 +211,7 @@ Optional receiver check:
 
 At startup the receiver reads the slave arm's current joint feedback and commands that current pose once. The first incoming master packet only arms startup sync and does not move the slave. After the master target moves, the receiver tracks the master's absolute joint targets with a small jump guard and tiny deadband. This keeps startup safe without preserving a permanent offset between the two arms.
 
-## Step 6: Start Computer 1
+## Step 8: Start Computer 1
 
 Before starting, put the master and slave arms in similar safe poses.
 
@@ -169,6 +224,19 @@ python scripts/computer1_piper_sender.py --port /dev/ttyACM0 --can can0
 ```
 
 The sender prefers live feedback frames when available. If the master CAN bus does not expose them, it automatically uses the UDP-compatible command frames `0x155`, `0x156`, and `0x157`. It requests 50 Hz updates, but sends the newest target only when Board A reports `TX done`, so the actual speed is the maximum the LoRa link can sustain.
+
+## Normal Shutdown
+
+1. Stop Computer 1 sender with `Ctrl+C`.
+2. Stop Computer 2 receiver with `Ctrl+C`.
+3. Power off or disable the slave arm only after motion has stopped.
+4. If CAN or USB was unplugged, restart CAN before the next run:
+
+   ```bash
+   sudo ip link set can0 down
+   sudo ip link set can0 type can bitrate 1000000 restart-ms 100
+   sudo ip link set can0 up
+   ```
 
 ## Expected Output
 
@@ -259,7 +327,13 @@ The receiver now tracks absolute master joint targets after startup. If it still
 
 Wrist roll stops early:
 
-The bridge allows joint 6 commands up to `-170` to `+170` degrees. If the wrist still stops earlier, the Piper motor angle limit stored in the arm firmware is probably lower than that.
+The bridge allows joint 6 commands up to `-170` to `+170` degrees. If the wrist still stops earlier, read the firmware limits:
+
+```bash
+python scripts/piper_configure_motor_limits.py --can can0
+```
+
+If one arm has a lower joint 6 range, apply the same limit profile on both arms with `--confirm WRITE_LIMITS`, power-cycle, and test again.
 
 Serial port busy:
 
