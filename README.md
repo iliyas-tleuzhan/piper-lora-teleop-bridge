@@ -154,7 +154,7 @@ Optional receiver check:
 
 - `--dry-run`: validate LoRa packets without connecting to or moving Piper.
 
-At startup the receiver reads the slave arm's current joint feedback, commands that current pose once, and uses the first incoming master target only as a relative baseline. This prevents the slave from jumping to an old command-frame pose when Computer 1 starts.
+At startup the receiver reads the slave arm's current joint feedback and commands that current pose once. The first incoming master packet only arms startup sync and does not move the slave. After the master target moves, the receiver tracks the master's absolute joint targets with a small jump guard and tiny deadband. This keeps startup safe without preserving a permanent offset between the two arms.
 
 ## Step 6: Start Computer 1
 
@@ -168,22 +168,22 @@ cd ~/Iliyas/piper-lora-teleop-bridge
 python scripts/computer1_piper_sender.py --port /dev/ttyACM0 --can can0
 ```
 
-The sender prefers live feedback frames when available. If the master CAN bus does not expose them, it automatically uses the UDP-compatible command frames `0x155`, `0x156`, and `0x157`. It sends the newest target only when Board A reports `TX done`.
+The sender prefers live feedback frames when available. If the master CAN bus does not expose them, it automatically uses the UDP-compatible command frames `0x155`, `0x156`, and `0x157`. It requests 50 Hz updates, but sends the newest target only when Board A reports `TX done`, so the actual speed is the maximum the LoRa link can sustain.
 
 ## Expected Output
 
 Computer 1 should print:
 
 ```text
-[MASTER] Sending 47-byte LoRa teleop packets to /dev/ttyACM0 at 15.00 Hz
-[MASTER] seq=12 deg=[...] gripper=unchanged
+[MASTER] Sending 47-byte LoRa teleop packets to /dev/ttyACM0 at 50.00 Hz
+[MASTER] seq=12 source=feedback deg=[...] gripper=unchanged
 ```
 
 Computer 2 should print:
 
 ```text
 [SLAVE] Startup pose locked at [...] deg
-[SLAVE] startup sync: holding current slave pose and using incoming target as relative baseline
+[SLAVE] startup sync: holding current slave pose; absolute tracking starts when the master target moves
 [SLAVE] accepted seq=12 dropped=0 total_dropped=0 cmd_rate=...
 ```
 
@@ -253,9 +253,9 @@ candump can0
 
 Look for either `0x2A5/0x2A6/0x2A7` or `0x155/0x156/0x157`. If both sets are missing, the sender cannot build a complete teleop target.
 
-Jitter or vibration:
+Jitter, lag, or poor matching:
 
-The receiver filters incoming targets before calling `JointCtrl()`. If vibration remains, check that only one Computer 1 sender is running and that Board B is not repeatedly disconnecting.
+The receiver now tracks absolute master joint targets after startup. If it still does not match, check the Computer 1 `source=...` log. `source=feedback` is the real master pose. `source=command` matches the old UDP bridge, but it can only be as accurate as the command frames being published on the master CAN bus. Also confirm only one Computer 1 sender is running and that Board B is not repeatedly disconnecting.
 
 Wrist roll stops early:
 

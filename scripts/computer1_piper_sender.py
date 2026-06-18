@@ -22,7 +22,7 @@ from piper_teleop_core import (
     raw_to_deg,
 )
 
-DEFAULT_SEND_RATE_HZ = 15.0
+DEFAULT_SEND_RATE_HZ = 50.0
 SERIAL_BAUD = 115200
 CAN_RECV_TIMEOUT_S = 0.005
 STATUS_RATE_HZ = 2.0

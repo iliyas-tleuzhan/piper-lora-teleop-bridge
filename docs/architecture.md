@@ -50,9 +50,10 @@ Computer 2:
 - Scans the Board B serial stream for valid binary teleop packets.
 - Rejects corrupt, stale, deadman-off, duplicate, and out-of-order packets.
 - Reads slave joint feedback at startup and locks the initial slave pose.
-- Treats the first incoming master target as a relative baseline instead of an immediate absolute command.
-- Rebases if the source target jumps suddenly, preventing a single stale packet from jerking the slave.
-- Smooths and step-limits commands before writing CAN.
+- Holds the first incoming master target instead of moving immediately.
+- Starts absolute master-target tracking only after the source target moves.
+- Holds and rearms if the source target jumps suddenly, preventing a single stale packet from jerking the slave.
+- Applies only a tiny deadband and a large per-packet jump guard before writing CAN.
 - Clamps raw Piper joint targets to known Piper joint limits.
 - Writes the slave Piper with `JointCtrl()` and `GripperCtrl()`.
 

@@ -14,10 +14,11 @@ MASTER_COMMAND_CAN_IDS = {0x151, 0x155, 0x156, 0x157, 0x159}
 MASTER_FEEDBACK_CAN_IDS = {0x2A5, 0x2A6, 0x2A7, 0x2A8}
 RAW_UNITS_PER_DEGREE = 1000
 SEQUENCE_RESET_AFTER_S = 1.0
-STARTUP_SOURCE_REBASE_RAW = 20000
-COMMAND_DEADBAND_RAW = 50
-SMOOTHING_ALPHA = 0.45
-MAX_STEP_RAW_PER_PACKET: tuple[int, ...] = (5000, 5000, 5000, 6000, 6000, 8000)
+STARTUP_SOURCE_REBASE_RAW = 45000
+STARTUP_ARM_DELTA_RAW = 500
+COMMAND_DEADBAND_RAW = 20
+SMOOTHING_ALPHA = 1.0
+MAX_STEP_RAW_PER_PACKET: tuple[int, ...] = (30000, 30000, 30000, 30000, 30000, 40000)
 JOINT_LIMITS_RAW: tuple[tuple[int, int], ...] = (
     (-150000, 150000),
     (0, 180000),
@@ -211,28 +212,27 @@ class MotionFilterDecision:
 
 
 class SlaveMotionFilter:
-    """Relative startup and smoothing filter for slave joint commands."""
+    """Startup hold and high-speed absolute tracking filter for slave commands."""
 
     def __init__(self, initial_slave_joints: list[int] | None = None) -> None:
         self.commanded_joints = (
             clamp_joints_raw(initial_slave_joints) if initial_slave_joints is not None else None
         )
-        self.base_slave_joints: list[int] | None = None
-        self.base_source_joints: list[int] | None = None
+        self.startup_source_joints: list[int] | None = None
         self.last_source_joints: list[int] | None = None
+        self.source_armed = False
 
     def update(self, source_joints: list[int]) -> MotionFilterDecision:
         source = clamp_joints_raw(source_joints)
-        initialized = self.base_source_joints is None
+        initialized = self.last_source_joints is None
         rebased = False
         source_jump_raw = 0
 
         if self.commanded_joints is None:
             self.commanded_joints = list(source)
 
-        if self.base_source_joints is None or self.base_slave_joints is None:
-            self.base_source_joints = list(source)
-            self.base_slave_joints = list(self.commanded_joints)
+        if self.last_source_joints is None:
+            self.startup_source_joints = list(source)
             self.last_source_joints = list(source)
             return MotionFilterDecision(
                 command_joints=list(self.commanded_joints),
@@ -242,24 +242,33 @@ class SlaveMotionFilter:
                 source_jump_raw=0,
             )
 
-        if self.last_source_joints is not None:
-            source_jump_raw = max_abs_delta_raw(self.last_source_joints, source)
-            if source_jump_raw > STARTUP_SOURCE_REBASE_RAW:
-                self.base_source_joints = list(source)
-                self.base_slave_joints = list(self.commanded_joints)
-                rebased = True
+        source_jump_raw = max_abs_delta_raw(self.last_source_joints, source)
+        if source_jump_raw > STARTUP_SOURCE_REBASE_RAW:
+            self.startup_source_joints = list(source)
+            self.last_source_joints = list(source)
+            self.source_armed = False
+            return MotionFilterDecision(
+                command_joints=list(self.commanded_joints),
+                adjusted_target_joints=list(self.commanded_joints),
+                initialized=False,
+                rebased=True,
+                source_jump_raw=source_jump_raw,
+            )
 
-        adjusted_target = clamp_joints_raw(
-            [
-                int(base_slave) + int(current_source) - int(base_source)
-                for base_slave, current_source, base_source in zip(
-                    self.base_slave_joints,
-                    source,
-                    self.base_source_joints,
-                    strict=True,
+        if not self.source_armed:
+            startup_source = self.startup_source_joints or source
+            if max_abs_delta_raw(startup_source, source) <= STARTUP_ARM_DELTA_RAW:
+                self.last_source_joints = list(source)
+                return MotionFilterDecision(
+                    command_joints=list(self.commanded_joints),
+                    adjusted_target_joints=list(self.commanded_joints),
+                    initialized=False,
+                    rebased=False,
+                    source_jump_raw=source_jump_raw,
                 )
-            ]
-        )
+            self.source_armed = True
+
+        adjusted_target = list(source)
         self.commanded_joints = smooth_step_raw(self.commanded_joints, adjusted_target)
         self.last_source_joints = list(source)
 

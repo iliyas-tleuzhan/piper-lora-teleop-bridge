@@ -71,17 +71,17 @@ Board B declares stale when no valid LoRa packet has arrived for more than one s
 
 ## Startup And Smoothing
 
-Computer 2 reads the slave arm's current joint feedback before it allows motion. The first valid master packet establishes a relative baseline, so the first packet cannot make the slave jump to an old absolute command target.
+Computer 2 reads the slave arm's current joint feedback before it allows motion. The first valid master packet is held and does not move the slave. Absolute tracking begins only after the master target moves, so startup cannot immediately command an old absolute target.
 
-After startup, Computer 2 filters targets before `JointCtrl()`:
+After startup, Computer 2 tracks the absolute master target before `JointCtrl()`:
 
 - Tiny command changes are ignored to avoid buzz.
-- Each packet is low-pass filtered.
-- Per-packet joint steps are limited.
-- A sudden large source-target jump causes a rebase instead of a jerk.
+- Normal packets pass through at the master's absolute raw joint angles.
+- Large per-packet differences are step-limited as a jump guard.
+- A sudden large source-target jump causes a hold and rearm instead of a jerk.
 
 ## Rate Limits
 
 LoRa is low-bandwidth. Do not forward raw high-rate CAN frames over LoRa.
 
-The sender is flow-controlled by Board A `TX done`, so it sends the newest target only when the radio is ready. The fixed binary packet always contains gripper fields, but the receiver only uses them when the gripper-present flag is set.
+The sender requests 50 Hz updates but is flow-controlled by Board A `TX done`, so it sends the newest target only when the radio is ready. The fixed binary packet always contains gripper fields, but the receiver only uses them when the gripper-present flag is set.

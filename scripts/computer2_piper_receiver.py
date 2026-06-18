@@ -146,8 +146,8 @@ def handle_packet(
 
     if motion.initialized:
         status.print(
-            "[SLAVE] startup sync: holding current slave pose and using incoming target "
-            "as relative baseline",
+            "[SLAVE] startup sync: holding current slave pose; absolute tracking starts "
+            "when the master target moves",
             force=True,
         )
     elif motion.rebased:

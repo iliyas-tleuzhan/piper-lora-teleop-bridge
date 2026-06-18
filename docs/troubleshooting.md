@@ -123,7 +123,7 @@ If only gripper-related frames change, the slave will only appear to follow the 
 
 ## Slave Jumps To An Old Pose On Startup
 
-Start with both arms in similar safe poses and start Computer 2 before Computer 1. The current receiver should print `Startup pose locked` and then use the first incoming master target as a relative baseline, so the first packet should not move the slave.
+Start with both arms in similar safe poses and start Computer 2 before Computer 1. The current receiver should print `Startup pose locked` and then hold the first incoming master target, so the first packet should not move the slave. Absolute tracking starts only after the master target moves.
 
 If the slave still moves to an unexpected previous target, stop both scripts, power-cycle or reset both ESP32 boards, and restart from Computer 2. Confirm you pulled the latest repo on both computers and that the sender prints:
 
@@ -131,13 +131,14 @@ If the slave still moves to an unexpected previous target, stop both scripts, po
 [MASTER] Waiting for 0x2A5/0x2A6/0x2A7 feedback, or UDP-compatible 0x155/0x156/0x157 command frames
 ```
 
-## Jitter Or Vibration
+## Jitter, Lag, Or Poor Matching
 
-The receiver smooths incoming targets before writing `JointCtrl()`. If vibration remains:
+The receiver tracks the master's absolute raw joint targets after startup. If motion is still jittery, delayed, or not matching:
 
 - Confirm only one Computer 1 sender is running.
 - Confirm Board B is not repeatedly disconnecting or reopening.
-- Confirm Computer 2 logs `cmd_rate` near the sender rate instead of bursts with many dropped packets.
+- Confirm Computer 2 logs `cmd_rate` near the LoRa link rate instead of bursts with many dropped packets.
+- Check Computer 1 logs for `source=feedback` or `source=command`. `source=feedback` is the real master pose; `source=command` follows the old UDP-compatible command stream and depends on those command frames being correct.
 
 ## Wrist Roll Stops Early
 
