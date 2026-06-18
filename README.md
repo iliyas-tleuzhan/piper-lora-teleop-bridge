@@ -1,8 +1,13 @@
 # Piper LoRa Teleop Bridge
 
-Fake transport test for LoRa-based wireless teleoperation between two AgileX Piper robot arms using two Heltec ESP32 WiFi LoRa 32 V4 boards.
+LoRa-based wireless teleoperation between two AgileX Piper robot arms using two Heltec ESP32 WiFi LoRa 32 V4 boards.
 
-This first version does not control Piper arms and does not connect to CAN. It only proves this path:
+The repository includes both:
+
+- A fake transport test that proves serial -> LoRa -> serial.
+- Real Piper teleoperation scripts that bridge Piper CAN state through the same LoRa packet.
+
+Fake test path:
 
 ```text
 Computer 1 fake sender
@@ -15,6 +20,22 @@ Computer 1 fake sender
 ```
 
 The fake sender generates smooth joint targets for `q1` to `q6` and `gripper`. The fake receiver validates packets and prints `Would send CAN command to slave Piper`.
+
+Real teleoperation path:
+
+```text
+Master Piper arm
+  -> CAN
+  -> Computer 1 real Piper sender
+  -> USB Serial
+  -> ESP32 Board A Serial->LoRa
+  -> LoRa at 923.2 MHz
+  -> ESP32 Board B LoRa->Serial
+  -> USB Serial
+  -> Computer 2 real Piper receiver
+  -> CAN
+  -> Slave Piper arm
+```
 
 ## Files
 
@@ -33,6 +54,10 @@ arduino/
 scripts/
   computer1_fake_sender.py
   computer2_fake_receiver.py
+  computer1_piper_sender.py
+  computer2_piper_receiver.py
+  piper_lora_protocol.py
+  piper_sdk_adapter.py
   list_serial_ports.py
 ```
 
@@ -117,6 +142,8 @@ source .venv/bin/activate
 pip install -r requirements.txt
 ```
 
+For real Piper control, run the real scripts on Linux computers with the Piper CAN adapters configured. The official AgileX SDK expects the CAN interface to be up at `1000000` bitrate, for example `can0`. Follow the Piper SDK CAN activation instructions for your adapter before starting these scripts.
+
 List serial ports:
 
 ```bash
@@ -173,6 +200,43 @@ Board B also prints a debug line:
 # STALE: no valid LoRa packet for >1s, fake slave would stop/freeze
 ```
 
+## Run Real Teleoperation
+
+Run the fake test successfully before trying real robot motion. Keep the ESP32 sketches unchanged; they are serial radio modems.
+
+On Computer 2, start the real receiver first:
+
+```bash
+python scripts/computer2_piper_receiver.py --port COM10 --can can0 --enable-arm
+```
+
+On Computer 1, start the real sender:
+
+```bash
+python scripts/computer1_piper_sender.py --port COM9 --can can0 --rate 5
+```
+
+Use the real serial ports from `scripts/list_serial_ports.py` and the real CAN names from `ip link show` / the Piper SDK CAN setup.
+
+Common Linux example:
+
+```bash
+python scripts/computer2_piper_receiver.py --port /dev/ttyACM1 --can can0 --enable-arm
+python scripts/computer1_piper_sender.py --port /dev/ttyACM0 --can can0 --rate 5
+```
+
+Useful options:
+
+- `computer1_piper_sender.py --source control` reads master-arm control frames. This is the default and is usually what you want for a Piper master arm in master/slave mode.
+- `computer1_piper_sender.py --source feedback` reads feedback frames instead.
+- `computer1_piper_sender.py --configure-master` sends `MasterSlaveConfig(0xFA, 0, 0, 0)` before reading.
+- `computer2_piper_receiver.py --configure-slave` sends `MasterSlaveConfig(0xFC, 0, 0, 0)` before controlling.
+- `computer2_piper_receiver.py --dry-run` validates packets and prints targets without writing Piper CAN motion commands.
+- `computer2_piper_receiver.py --smoothing 0.35 --command-rate 20` controls interpolation between low-rate LoRa updates.
+- `computer2_piper_receiver.py --no-disable-on-exit` leaves the arm enabled when the script exits. The default is to disable on exit.
+
+If packets become stale for more than `--stale-timeout` seconds, or the deadman flag is off, the real receiver stops sending commands and disables the slave arm by default.
+
 ## LoRa Settings
 
 - Frequency: `923200000` Hz
@@ -184,6 +248,11 @@ Board B also prints a debug line:
 - IQ inversion: off
 - CRC: enabled in the Heltec radio config
 
-## Next Step After The Fake Test Works
+## Piper SDK Notes
 
-Keep the ESP32 sketches as mostly unchanged serial radio modems. Replace `scripts/computer1_fake_sender.py` with a master Piper CAN reader, and replace the fake print in `scripts/computer2_fake_receiver.py` with a slave Piper CAN writer. Keep the LoRa packet compact, send joint targets at about 2-5 Hz, and smooth/interpolate on Computer 2.
+The real scripts use AgileX `piper_sdk`:
+
+- Computer 1 reads `GetArmJointCtrl()` / `GetArmGripperCtrl()` by default.
+- Computer 2 sends `JointCtrl()` / `GripperCtrl()` after setting joint control mode.
+- Joint units are converted between SDK `0.001 degrees` and LoRa packet centi-degrees.
+- Gripper position is converted between SDK `0.001 mm` and packet percent using `--gripper-max-mm`, default `70.0`.
