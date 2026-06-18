@@ -18,9 +18,9 @@ Master Piper arm
   -> Slave Piper arm
 ```
 
-## First Fake Test
+## Fake Test
 
-This repository implements only the fake transport test:
+The fake transport test proves:
 
 ```text
 Computer 1 fake packet
@@ -34,6 +34,28 @@ Computer 1 fake packet
 
 There is no Piper control and no CAN connection in this version. The Python sender generates smooth fake joint targets. Board A forwards valid `PIPER` serial lines over LoRa. Board B validates LoRa packets and forwards valid `PIPER` lines over serial. The Computer 2 receiver validates the packet again and prints what it would send to the slave Piper.
 
+## Real Teleoperation
+
+The real teleoperation scripts keep the ESP32 boards as simple serial radio modems:
+
+```text
+Computer 1:
+  piper_sdk CAN reader
+  -> compact PIPER target packet
+  -> Board A serial
+
+Computer 2:
+  Board B serial
+  -> packet validation
+  -> stale/deadman gate
+  -> smoothed target interpolation
+  -> piper_sdk CAN JointCtrl/GripperCtrl
+```
+
+`scripts/computer1_piper_sender.py` reads the master Piper with `piper_sdk`. By default it reads control frames with `GetArmJointCtrl()` and `GetArmGripperCtrl()`, which matches a master arm in master/slave mode. It can also read feedback frames with `--source feedback`.
+
+`scripts/computer2_piper_receiver.py` validates LoRa packets, drops corrupt or stale input, smooths the most recent target at a local command rate, and writes the slave Piper with `JointCtrl()` and `GripperCtrl()`.
+
 ## Why The ESP32 Boards Stay Simple
 
 The ESP32 boards act as radio modems. They do not understand Piper CAN. This keeps the embedded code small and reduces risk:
@@ -43,11 +65,9 @@ The ESP32 boards act as radio modems. They do not understand Piper CAN. This kee
 - Both boards validate the checksum so corrupted packets are dropped early.
 - Board B detects stale traffic and displays/prints a fake stop warning.
 
-## Future Real Upgrade
+## Safety Behavior
 
-After the fake test works:
-
-- Replace `scripts/computer1_fake_sender.py` with a master Piper CAN reader.
-- Replace the fake CAN print in `scripts/computer2_fake_receiver.py` with a slave Piper CAN writer.
-- Keep the ESP32 sketches mostly unchanged because they are just serial-to-LoRa and LoRa-to-serial modems.
-- Send compact joint targets rather than raw high-rate CAN frames.
+- The packet deadman flag must be enabled before the receiver commands the slave.
+- If no valid live packet arrives for more than the receiver `--stale-timeout`, the receiver stops commands.
+- The receiver disables all Piper motors on stale input and on exit by default.
+- `--dry-run` on the receiver validates the real LoRa stream without writing CAN motion commands.
