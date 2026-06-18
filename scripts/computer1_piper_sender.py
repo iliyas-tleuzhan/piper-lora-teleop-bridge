@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Computer 1: live master Piper CAN feedback -> Board A serial -> LoRa."""
+"""Computer 1: master Piper CAN targets -> Board A serial -> LoRa."""
 
 from __future__ import annotations
 
@@ -13,9 +13,11 @@ import serial
 
 from piper_lora_protocol import BINARY_PACKET_SIZE, build_piper_teleop_packet
 from piper_teleop_core import (
+    MASTER_COMMAND_CAN_IDS,
     MASTER_FEEDBACK_CAN_IDS,
-    MasterFeedbackState,
+    MasterSourceState,
     RateLimitedPrinter,
+    decode_master_command_frame,
     decode_master_feedback_frame,
     raw_to_deg,
 )
@@ -27,13 +29,14 @@ STATUS_RATE_HZ = 2.0
 STARTUP_DELAY_S = 3.0
 BOARD_TX_RECOVERY_S = 0.2
 GRIPPER_REFRESH_S = 1.0
-SOURCE_FRAME_TIMEOUT_S = 0.4
+FEEDBACK_FRAME_TIMEOUT_S = 0.4
+COMMAND_FRAME_TIMEOUT_S = 0.8
 
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description=(
-            "Read master Piper SocketCAN feedback frames and send raw joint targets "
+            "Read master Piper SocketCAN target frames and send raw joint targets "
             "to Board A over serial for LoRa transport."
         )
     )
@@ -77,6 +80,26 @@ def open_can_bus(can_interface: str):
     return can.interface.Bus(channel=can_interface, interface="socketcan")
 
 
+def format_seen_ids(seen_counts: dict[int, int]) -> str:
+    if not seen_counts:
+        return "none"
+    top_ids = sorted(seen_counts.items(), key=lambda item: (-item[1], item[0]))[:8]
+    return " ".join(f"0x{arbitration_id:X}:{count}" for arbitration_id, count in top_ids)
+
+
+def choose_source(
+    *,
+    feedback_state: MasterSourceState,
+    command_state: MasterSourceState,
+    now_s: float,
+) -> tuple[str, MasterSourceState] | None:
+    if feedback_state.has_fresh_joint_target(now_s, FEEDBACK_FRAME_TIMEOUT_S):
+        return "feedback", feedback_state
+    if command_state.has_fresh_joint_target(now_s, COMMAND_FRAME_TIMEOUT_S):
+        return "command", command_state
+    return None
+
+
 def main() -> int:
     args = parse_args()
     if exit_code := validate_args(args):
@@ -101,7 +124,9 @@ def main() -> int:
 
     period = 1.0 / args.rate
     seq = 0
-    state = MasterFeedbackState()
+    feedback_state = MasterSourceState()
+    command_state = MasterSourceState()
+    seen_counts: dict[int, int] = {}
     status = RateLimitedPrinter(STATUS_RATE_HZ)
     start_time = time.monotonic()
     next_send = start_time
@@ -126,12 +151,15 @@ def main() -> int:
             print(f"Waiting {STARTUP_DELAY_S:.1f} seconds for ESP32 serial startup...")
             time.sleep(STARTUP_DELAY_S)
 
-            print(f"[MASTER] Reading live Piper feedback CAN frames from {args.can}")
+            print(f"[MASTER] Reading Piper CAN target frames from {args.can}")
             print(
                 f"[MASTER] Sending {BINARY_PACKET_SIZE}-byte LoRa teleop packets "
                 f"to {args.port} at {args.rate:.2f} Hz"
             )
-            print("[MASTER] Waiting for fresh 0x2A5/0x2A6/0x2A7 joint feedback set")
+            print(
+                "[MASTER] Waiting for 0x2A5/0x2A6/0x2A7 feedback, "
+                "or UDP-compatible 0x155/0x156/0x157 command frames"
+            )
 
             while not stop_requested:
                 now = time.monotonic()
@@ -142,8 +170,13 @@ def main() -> int:
                     print(f"CAN read failed on {args.can}: {exc}", file=sys.stderr)
                     return 1
 
-                if message is not None and int(message.arbitration_id) in MASTER_FEEDBACK_CAN_IDS:
-                    decode_master_feedback_frame(message, state)
+                if message is not None:
+                    arbitration_id = int(message.arbitration_id)
+                    seen_counts[arbitration_id] = seen_counts.get(arbitration_id, 0) + 1
+                    if arbitration_id in MASTER_FEEDBACK_CAN_IDS:
+                        decode_master_feedback_frame(message, feedback_state)
+                    elif arbitration_id in MASTER_COMMAND_CAN_IDS:
+                        decode_master_command_frame(message, command_state)
 
                 now = time.monotonic()
                 if now < next_send:
@@ -155,10 +188,20 @@ def main() -> int:
                     else:
                         continue
 
-                if not state.has_fresh_joint_target(now, SOURCE_FRAME_TIMEOUT_S):
-                    status.print("[MASTER] Waiting for fresh joint feedback frames")
+                source = choose_source(
+                    feedback_state=feedback_state,
+                    command_state=command_state,
+                    now_s=now,
+                )
+                if source is None:
+                    status.print(
+                        "[MASTER] Waiting for complete joint frames "
+                        "(feedback 0x2A5/0x2A6/0x2A7 or command 0x155/0x156/0x157); "
+                        f"seen CAN IDs: {format_seen_ids(seen_counts)}"
+                    )
                     next_send = now + period
                     continue
+                source_name, state = source
 
                 sender_time_ms = int((now - start_time) * 1000.0)
                 gripper_to_send = None
@@ -189,7 +232,7 @@ def main() -> int:
                     last_gripper_sent_at = now
 
                 status.print(
-                    f"[MASTER] seq={seq} "
+                    f"[MASTER] seq={seq} source={source_name} "
                     f"deg={[round(raw_to_deg(value), 3) for value in state.joints_raw()]} "
                     f"gripper={'sent' if gripper_to_send is not None else 'unchanged'}"
                 )

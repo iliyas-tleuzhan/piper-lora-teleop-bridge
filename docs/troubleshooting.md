@@ -108,18 +108,23 @@ Common causes:
 
 ## Slave Does Not Follow Master Joints
 
-On Computer 1, check live master feedback:
+On Computer 1, check master CAN traffic:
 
 ```bash
 candump can0
 ```
 
-You must see `0x2A5`, `0x2A6`, and `0x2A7`, and the data should change when you move the master arm. If only gripper-related frames change, the slave will only appear to follow the gripper.
+You must see one complete joint source:
+
+- Preferred feedback source: `0x2A5`, `0x2A6`, and `0x2A7`.
+- UDP-compatible command source: `0x155`, `0x156`, and `0x157`.
+
+If only gripper-related frames change, the slave will only appear to follow the gripper. The Computer 1 sender now prints the most common CAN IDs it has seen while waiting.
 
 ## Slave Jumps To An Old Pose On Startup
 
-This should not happen with the current sender because it uses live feedback frames only. If it happens, confirm you pulled the latest repo on Computer 1 and that the sender prints:
+Start with both arms in similar safe poses and start Computer 2 before Computer 1. If the slave moves to an unexpected previous target, stop both scripts, power-cycle or reset both ESP32 boards, and restart from Computer 2. Confirm you pulled the latest repo on Computer 1 and that the sender prints:
 
 ```text
-[MASTER] Waiting for fresh 0x2A5/0x2A6/0x2A7 joint feedback set
+[MASTER] Waiting for 0x2A5/0x2A6/0x2A7 feedback, or UDP-compatible 0x155/0x156/0x157 command frames
 ```

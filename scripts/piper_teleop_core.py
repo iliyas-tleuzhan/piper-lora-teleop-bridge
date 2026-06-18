@@ -10,6 +10,7 @@ from typing import Protocol
 from piper_lora_protocol import PiperTeleopPacket
 
 
+MASTER_COMMAND_CAN_IDS = {0x151, 0x155, 0x156, 0x157, 0x159}
 MASTER_FEEDBACK_CAN_IDS = {0x2A5, 0x2A6, 0x2A7, 0x2A8}
 RAW_UNITS_PER_DEGREE = 1000
 SEQUENCE_RESET_AFTER_S = 1.0
@@ -43,10 +44,11 @@ def decode_i32_be(data: bytes | bytearray | memoryview) -> int:
 
 
 @dataclass
-class MasterFeedbackState:
+class MasterSourceState:
     joints: list[int | None] = field(default_factory=lambda: [None] * 6)
     joint_updated_at: list[float | None] = field(default_factory=lambda: [None] * 6)
     gripper: dict[str, int] | None = None
+    mode_frame: list[int] | None = None
 
     def has_full_joint_target(self) -> bool:
         return all(value is not None for value in self.joints)
@@ -72,7 +74,40 @@ class MasterFeedbackState:
         self.joint_updated_at[first_index + 1] = now_s
 
 
-def decode_master_feedback_frame(message: CanMessage, state: MasterFeedbackState) -> bool:
+def decode_master_command_frame(message: CanMessage, state: MasterSourceState) -> bool:
+    arbitration_id = int(message.arbitration_id)
+    data = bytes(message.data)
+    if arbitration_id not in MASTER_COMMAND_CAN_IDS:
+        return False
+
+    if arbitration_id == 0x151 and len(data) == 8:
+        state.mode_frame = list(data)
+        return True
+
+    if arbitration_id == 0x155 and len(data) == 8:
+        state.update_joint_pair(0, decode_i32_be(data[0:4]), decode_i32_be(data[4:8]))
+        return True
+
+    if arbitration_id == 0x156 and len(data) == 8:
+        state.update_joint_pair(2, decode_i32_be(data[0:4]), decode_i32_be(data[4:8]))
+        return True
+
+    if arbitration_id == 0x157 and len(data) == 8:
+        state.update_joint_pair(4, decode_i32_be(data[0:4]), decode_i32_be(data[4:8]))
+        return True
+
+    if arbitration_id == 0x159 and len(data) == 8:
+        state.gripper = {
+            "angle": decode_i32_be(data[0:4]),
+            "effort": int.from_bytes(data[4:6], byteorder="big", signed=False),
+            "code": data[6],
+        }
+        return True
+
+    return False
+
+
+def decode_master_feedback_frame(message: CanMessage, state: MasterSourceState) -> bool:
     arbitration_id = int(message.arbitration_id)
     data = bytes(message.data)
     if arbitration_id not in MASTER_FEEDBACK_CAN_IDS:

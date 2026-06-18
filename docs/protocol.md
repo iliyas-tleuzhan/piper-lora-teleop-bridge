@@ -49,14 +49,21 @@ The binary packet uses CRC-16/CCITT-FALSE:
 
 ## Source CAN Frames
 
-Computer 1 builds each target from live master Piper feedback frames:
+Computer 1 builds each target from one complete master Piper joint source. It prefers feedback frames when they are available:
 
 - `0x2A5`: joints 1 and 2
 - `0x2A6`: joints 3 and 4
 - `0x2A7`: joints 5 and 6
 - `0x2A8`: optional gripper feedback
 
-The sender refuses to transmit until it has a fresh full joint set. This avoids replaying old latched command targets from before the script started.
+If feedback frames are not present, it uses the same command frames as the working UDP bridge:
+
+- `0x155`: joints 1 and 2
+- `0x156`: joints 3 and 4
+- `0x157`: joints 5 and 6
+- `0x159`: optional gripper command
+
+The sender refuses to transmit until it has a fresh full joint set from one of those sources.
 
 ## Stale Behavior
 

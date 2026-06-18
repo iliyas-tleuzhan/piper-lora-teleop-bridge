@@ -24,9 +24,10 @@ The ESP32 boards are radio modems. They do not read or write Piper CAN.
 
 Computer 1:
 
-- Reads live SocketCAN feedback frames from the master Piper.
-- Uses `0x2A5`, `0x2A6`, and `0x2A7` for joints 1-6.
-- Uses `0x2A8` for optional gripper feedback.
+- Reads SocketCAN target frames from the master Piper.
+- Prefers feedback frames `0x2A5`, `0x2A6`, and `0x2A7` for joints 1-6 when present.
+- Falls back to UDP-compatible command frames `0x155`, `0x156`, and `0x157` when feedback frames are not present.
+- Uses `0x2A8` or `0x159` for optional gripper data.
 - Waits for a fresh full joint set before sending.
 - Writes compact 47-byte binary `PLT1` packets to Board A.
 - Waits for Board A `TX done` before sending another packet.
@@ -51,9 +52,9 @@ Computer 2:
 - Clamps raw Piper joint targets to known Piper joint limits.
 - Writes the slave Piper with `JointCtrl()` and `GripperCtrl()`.
 
-## Why Live Feedback Frames Matter
+## Source Selection
 
-The sender follows the physical master pose, not the last command that happened to be present on CAN. That prevents the slave from jumping to an old pose when the script starts after the master has been moved by hand.
+Different Piper setups expose different useful master-side frames. The sender uses live feedback frames when they exist, but your known-good UDP teleop used command frames, so the LoRa sender falls back to those same IDs automatically.
 
 ## Safety Behavior
 

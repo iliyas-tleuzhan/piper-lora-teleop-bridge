@@ -8,7 +8,7 @@ This project mirrors the working `piper-wireless-teleop` UDP behavior, but repla
 Computer 1 -> USB Serial -> ESP32 Board A -> LoRa -> ESP32 Board B -> USB Serial -> Computer 2
 ```
 
-The ESP32 boards are simple serial LoRa modems. They do not understand Piper CAN. Computer 1 reads live master Piper SocketCAN feedback frames, sends compact 47-byte binary `PLT1` packets over LoRa, and Computer 2 validates those packets before commanding the slave Piper with `piper_sdk`.
+The ESP32 boards are simple serial LoRa modems. They do not understand Piper CAN. Computer 1 reads master Piper SocketCAN target frames, sends compact 47-byte binary `PLT1` packets over LoRa, and Computer 2 validates those packets before commanding the slave Piper with `piper_sdk`.
 
 ## Hardware
 
@@ -75,20 +75,27 @@ sudo ip link set can0 type can bitrate 1000000 restart-ms 100
 sudo ip link set can0 up
 ```
 
-Check that the master arm is producing live feedback frames on Computer 1:
+Check that the master arm is producing Piper frames on Computer 1:
 
 ```bash
 candump can0
 ```
 
-For teleop, Computer 1 must see these master feedback IDs:
+For teleop, Computer 1 must see one complete joint source. The sender prefers live feedback IDs if available:
 
 - `0x2A5`: joints 1 and 2
 - `0x2A6`: joints 3 and 4
 - `0x2A7`: joints 5 and 6
 - `0x2A8`: optional gripper feedback
 
-If Computer 1 prints `Waiting for fresh joint feedback frames`, run `candump can0` and verify `0x2A5`, `0x2A6`, and `0x2A7` are present and changing when you move the master arm. If those IDs are missing, Computer 1 is not seeing the live physical master pose.
+If those are not present, the sender uses the same command IDs as the working UDP bridge:
+
+- `0x155`: joints 1 and 2
+- `0x156`: joints 3 and 4
+- `0x157`: joints 5 and 6
+- `0x159`: optional gripper command
+
+If Computer 1 prints `Waiting for complete joint frames`, run `candump can0` and verify either `0x2A5/0x2A6/0x2A7` or `0x155/0x156/0x157` are present.
 
 ## Step 3: Upload ESP32 Firmware
 
@@ -159,7 +166,7 @@ cd ~/Iliyas/piper-lora-teleop-bridge
 python scripts/computer1_piper_sender.py --port /dev/ttyACM0 --can can0
 ```
 
-The sender uses live feedback frames, not latched command frames. It waits for a fresh full set of `0x2A5`, `0x2A6`, and `0x2A7`, then sends the newest target only when Board A reports `TX done`.
+The sender prefers live feedback frames when available. If the master CAN bus does not expose them, it automatically uses the UDP-compatible command frames `0x155`, `0x156`, and `0x157`. It sends the newest target only when Board A reports `TX done`.
 
 ## Expected Output
 
@@ -182,7 +189,7 @@ If Computer 2 prints no accepted packets:
 2. Confirm both ESP32 sketches were re-uploaded from this repo.
 3. Confirm both ESP32 sketches use `923200000` Hz and `LORA_BANDWIDTH 1`.
 4. Confirm the serial ports are correct and not open in Arduino Serial Monitor.
-5. Confirm Computer 1 sees `0x2A5`, `0x2A6`, and `0x2A7` with `candump can0`.
+5. Confirm Computer 1 sees either `0x2A5/0x2A6/0x2A7` or `0x155/0x156/0x157` with `candump can0`.
 
 ## Hong Kong LoRa Settings
 
@@ -208,7 +215,7 @@ Before enabling motion:
 - Master and slave are on separate CAN buses.
 - `candump can0` works on both computers.
 - Computer 2 receiver is started before Computer 1 sender.
-- Computer 1 sees `0x2A5`, `0x2A6`, and `0x2A7` before you expect motion.
+- Computer 1 sees either `0x2A5/0x2A6/0x2A7` or `0x155/0x156/0x157` before you expect motion.
 
 ## Troubleshooting
 
@@ -233,13 +240,13 @@ sudo ip link set can0 type can bitrate 1000000 restart-ms 100
 sudo ip link set can0 up
 ```
 
-No master feedback frames:
+No master joint frames:
 
 ```bash
 candump can0
 ```
 
-Look for `0x2A5`, `0x2A6`, and `0x2A7`. If they are missing, the sender cannot build a complete live teleop target.
+Look for either `0x2A5/0x2A6/0x2A7` or `0x155/0x156/0x157`. If both sets are missing, the sender cannot build a complete teleop target.
 
 Serial port busy:
 
