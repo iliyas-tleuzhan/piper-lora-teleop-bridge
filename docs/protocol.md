@@ -2,7 +2,7 @@
 
 ## Packet Format
 
-Each packet is one ASCII line ending in `\n`:
+Each fake-test packet is one ASCII line ending in `\n`:
 
 ```text
 PIPER,<seq>,<time_ms>,<q1_cd>,<q2_cd>,<q3_cd>,<q4_cd>,<q5_cd>,<q6_cd>,<gripper_p100>,<flags>,<checksum>
@@ -24,12 +24,40 @@ Fields:
 - `flags`: integer bitfield.
 - `checksum`: unsigned 16-bit checksum.
 
+## Real Teleop Packet Format
+
+Real teleoperation uses a raw Piper packet in the same `PIPER` envelope:
+
+```text
+PIPER,<seq>,<time_ms>,<j1_raw>,<j2_raw>,<j3_raw>,<j4_raw>,<j5_raw>,<j6_raw>,<gripper_angle>,<gripper_effort>,<gripper_code>,<flags>,<checksum>
+```
+
+Example:
+
+```text
+PIPER,42,123456,10000,20000,-30000,0,5000,-6000,35000,1000,1,3,20049
+```
+
+Fields:
+
+- `j1_raw` to `j6_raw`: raw Piper joint targets in `0.001 degrees`, decoded directly from master CAN frames `0x155`, `0x156`, and `0x157`.
+- `gripper_angle`: raw gripper travel from CAN frame `0x159`, in `0.001 mm`.
+- `gripper_effort`: raw gripper effort from CAN frame `0x159`.
+- `gripper_code`: raw gripper command code from CAN frame `0x159`.
+- `flags`: integer bitfield.
+- `checksum`: unsigned 16-bit checksum.
+
 ## Flags
 
 `flags` bit 0 is the teleoperation deadman:
 
 - `1`: deadman enabled, receiver may command the slave Piper.
 - `0`: deadman disabled, receiver treats the packet as a stop condition.
+
+`flags` bit 1 means a gripper command is present:
+
+- `1`: receiver sends `GripperCtrl()`.
+- `0`: receiver sends only `JointCtrl()`.
 
 ## Checksum
 
@@ -67,27 +95,19 @@ Board B declares stale when no valid LoRa packet has arrived for more than one s
 # STALE: no valid LoRa packet for >1s, fake slave would stop/freeze
 ```
 
-Computer 2 also declares stale when no valid live packet has been read for more than `--stale-timeout`, default `1.0` second:
-
-```text
-STALE: fake slave would stop/freeze now.
-```
-
-The real receiver stops CAN command output on stale input and disables all Piper motors by default.
+Computer 2 also declares stale when no valid live packet has been read for more than `--stale-timeout`, default `0.5` second. The real receiver warns and holds the last command, matching the UDP teleop reference.
 
 ## Rate Limits
 
 LoRa is low-bandwidth. Do not forward raw high-rate CAN frames over LoRa.
 
-For a real Piper LoRa demo, send compact joint targets at 2-5 Hz and let Computer 2 smooth/interpolate locally. Keep packets short and drop corrupted or stale packets.
+For a real Piper LoRa demo, send compact joint targets at 2-5 Hz. Keep packets short and drop corrupted or stale packets.
 
 ## Real Piper Unit Mapping
 
 The Python real teleoperation scripts map units as follows:
 
-- Piper SDK joint control/feedback: `0.001 degrees`.
-- LoRa packet joint fields: `0.01 degrees`.
+- Piper CAN joint command frames: `0.001 degrees`.
+- LoRa packet real teleop joint fields: `0.001 degrees`.
 - Piper SDK gripper: `0.001 mm`.
-- LoRa packet gripper field: percent times 100.
-
-`--gripper-max-mm` controls the conversion between gripper percent and SDK gripper travel. The default is `70.0`.
+- LoRa packet real teleop gripper field: raw Piper `0x159` gripper command values.

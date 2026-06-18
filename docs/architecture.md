@@ -40,21 +40,28 @@ The real teleoperation scripts keep the ESP32 boards as simple serial radio mode
 
 ```text
 Computer 1:
-  piper_sdk CAN reader
-  -> compact PIPER target packet
+  python-can raw master command reader
+  -> raw compact PIPER target packet
   -> Board A serial
 
 Computer 2:
   Board B serial
   -> packet validation
   -> stale/deadman gate
-  -> smoothed target interpolation
+  -> optional slew limit
   -> piper_sdk CAN JointCtrl/GripperCtrl
 ```
 
-`scripts/computer1_piper_sender.py` reads the master Piper with `piper_sdk`. By default it reads control frames with `GetArmJointCtrl()` and `GetArmGripperCtrl()`, which matches a master arm in master/slave mode. It can also read feedback frames with `--source feedback`.
+`scripts/computer1_piper_sender.py` matches the `piper-wireless-teleop` master sender. It reads raw SocketCAN command frames from the master Piper:
 
-`scripts/computer2_piper_receiver.py` validates LoRa packets, drops corrupt or stale input, smooths the most recent target at a local command rate, and writes the slave Piper with `JointCtrl()` and `GripperCtrl()`.
+- `0x155`: joints 1 and 2
+- `0x156`: joints 3 and 4
+- `0x157`: joints 5 and 6
+- `0x159`: optional gripper command
+
+It stores the latest complete target and sends that target over LoRa at the requested packet rate. The sender does not use `piper_sdk`.
+
+`scripts/computer2_piper_receiver.py` validates LoRa packets, drops corrupt packets, rejects deadman-off and out-of-order packets, clamps raw Piper joint targets to known Piper joint limits, and writes the slave Piper with `JointCtrl()` and `GripperCtrl()`. It follows the latest valid target directly by default, with optional slew limiting available through `--enable-slew-limit`.
 
 ## Why The ESP32 Boards Stay Simple
 
@@ -68,6 +75,6 @@ The ESP32 boards act as radio modems. They do not understand Piper CAN. This kee
 ## Safety Behavior
 
 - The packet deadman flag must be enabled before the receiver commands the slave.
-- If no valid live packet arrives for more than the receiver `--stale-timeout`, the receiver stops commands.
-- The receiver disables all Piper motors on stale input and on exit by default.
+- The receiver refuses to move unless started with `--confirm MOVE`.
+- If no valid live packet arrives for more than the receiver `--stale-timeout`, the receiver warns and holds the last command.
 - `--dry-run` on the receiver validates the real LoRa stream without writing CAN motion commands.

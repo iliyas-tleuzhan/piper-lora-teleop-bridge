@@ -19,13 +19,18 @@ class PiperSdkUnavailable(RuntimeError):
 
 def _import_sdk() -> tuple[Any, Any]:
     try:
-        from piper_sdk import C_PiperInterface, LogLevel  # type: ignore
+        import piper_sdk  # type: ignore
     except ImportError as exc:
         raise PiperSdkUnavailable(
             "piper_sdk is not installed. Install it on the Piper computers with "
             "`pip install piper_sdk` after activating the CAN environment."
         ) from exc
-    return C_PiperInterface, LogLevel
+
+    interface_cls = getattr(piper_sdk, "C_PiperInterface_V2", None)
+    if interface_cls is None:
+        interface_cls = getattr(piper_sdk, "C_PiperInterface")
+    log_level = getattr(piper_sdk, "LogLevel", None)
+    return interface_cls, log_level
 
 
 def _message_from_sdk_result(result: Any) -> Any:
@@ -80,17 +85,22 @@ class PiperArm:
         sdk_gripper_limit: bool = True,
     ) -> None:
         C_PiperInterface, LogLevel = _import_sdk()
-        self._piper = C_PiperInterface(
-            can_name=can_name,
-            judge_flag=judge_flag,
-            can_auto_init=can_auto_init,
-            dh_is_offset=dh_is_offset,
-            start_sdk_joint_limit=sdk_joint_limit,
-            start_sdk_gripper_limit=sdk_gripper_limit,
-            logger_level=LogLevel.WARNING,
-            log_to_file=False,
-            log_file_path=None,
-        )
+        kwargs: dict[str, Any] = {
+            "can_name": can_name,
+            "judge_flag": judge_flag,
+            "can_auto_init": can_auto_init,
+            "dh_is_offset": dh_is_offset,
+            "start_sdk_joint_limit": sdk_joint_limit,
+            "start_sdk_gripper_limit": sdk_gripper_limit,
+            "log_to_file": False,
+            "log_file_path": None,
+        }
+        if LogLevel is not None:
+            kwargs["logger_level"] = LogLevel.WARNING
+        try:
+            self._piper = C_PiperInterface(**kwargs)
+        except TypeError:
+            self._piper = C_PiperInterface(can_name)
 
     def connect(self) -> None:
         self._piper.ConnectPort()
@@ -112,13 +122,33 @@ class PiperArm:
 
     def configure_joint_control(self, *, speed_percent: int, high_follow: bool) -> None:
         mit_mode = 0xAD if high_follow else 0x00
+        self.configure_motion(
+            control_mode=0x01,
+            move_mode=0x01,
+            speed_percent=speed_percent,
+            follow_mode=mit_mode,
+        )
+
+    def configure_motion(
+        self,
+        *,
+        control_mode: int,
+        move_mode: int,
+        speed_percent: int,
+        follow_mode: int,
+    ) -> None:
         if hasattr(self._piper, "MotionCtrl_2"):
-            self._piper.MotionCtrl_2(0x01, 0x01, speed_percent, mit_mode)
+            self._piper.MotionCtrl_2(control_mode, move_mode, speed_percent, follow_mode)
         else:
-            self._piper.ModeCtrl(0x01, 0x01, speed_percent, mit_mode)
+            self._piper.ModeCtrl(control_mode, move_mode, speed_percent, follow_mode)
 
     def enable_all(self) -> None:
-        self._piper.EnableArm(7)
+        if hasattr(self._piper, "EnableArm"):
+            self._piper.EnableArm(7)
+        elif hasattr(self._piper, "EnableArmStandbyMode"):
+            self._piper.EnableArmStandbyMode(7)
+        else:
+            raise AttributeError("Piper SDK does not expose an arm enable method")
 
     def disable_all(self) -> None:
         self._piper.DisableArm(7)
@@ -156,6 +186,21 @@ class PiperArm:
             return
         self._piper.JointCtrl(*state.q_mdeg)
         self._piper.GripperCtrl(max(0, state.gripper_um), gripper_effort, 0x01, 0)
+
+    def write_joints_raw(self, joints_raw: list[int], *, dry_run: bool) -> None:
+        if len(joints_raw) != 6:
+            raise ValueError("JointCtrl requires exactly 6 joint values")
+        if dry_run:
+            return
+        self._piper.JointCtrl(*[int(value) for value in joints_raw])
+
+    def write_gripper_raw(self, gripper: dict[str, int], *, default_effort: int, dry_run: bool) -> None:
+        if dry_run:
+            return
+        angle = int(gripper.get("angle", 0))
+        effort = int(gripper.get("effort", default_effort))
+        code = int(gripper.get("code", 1))
+        self._piper.GripperCtrl(angle, effort, code, 0)
 
 
 def gripper_um_to_p100(gripper_um: int, max_mm: float) -> int:

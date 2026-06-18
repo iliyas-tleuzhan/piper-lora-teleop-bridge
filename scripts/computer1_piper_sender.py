@@ -1,10 +1,9 @@
 #!/usr/bin/env python3
-"""Real Piper master sender: CAN state -> Board A serial -> LoRa."""
+"""Computer 1: raw master Piper CAN commands -> Board A serial -> LoRa."""
 
 from __future__ import annotations
 
 import argparse
-import subprocess
 import signal
 import sys
 import threading
@@ -12,34 +11,39 @@ import time
 
 import serial
 
-from piper_lora_protocol import DEADMAN_ENABLED, build_piper_line, mdeg_to_cd
-from piper_sdk_adapter import PiperArm, PiperSdkUnavailable, gripper_um_to_p100
+from piper_lora_protocol import build_piper_teleop_line
+from piper_teleop_core import (
+    MASTER_CAN_IDS,
+    MasterCommandState,
+    RateLimitedPrinter,
+    decode_master_frame,
+    raw_to_deg,
+)
 
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="Read a Piper master arm over CAN and send compact joint targets to Board A."
+        description=(
+            "Read master Piper SocketCAN command frames and send raw joint targets "
+            "to Board A over serial for LoRa transport."
+        )
     )
-    parser.add_argument("--port", required=True, help="Board A serial port, for example COM9")
+    parser.add_argument("--port", required=True, help="Board A serial port, for example /dev/ttyACM0")
     parser.add_argument("--baud", type=int, default=115200, help="Board A serial baud rate")
-    parser.add_argument("--can", default="can0", help="Piper CAN interface name")
+    parser.add_argument("--can", default="can0", help="Master Piper SocketCAN interface")
     parser.add_argument("--rate", type=float, default=5.0, help="LoRa target packets per second")
+    parser.add_argument("--deadman", action="store_true", help="Set packet deadman=true")
     parser.add_argument(
-        "--source",
-        choices=("control", "feedback"),
-        default="control",
-        help="Use control frames for a master arm, or feedback frames for a slave/normal arm.",
-    )
-    parser.add_argument(
-        "--configure-master",
-        action="store_true",
-        help="Send MasterSlaveConfig(0xFA, 0, 0, 0) before reading.",
-    )
-    parser.add_argument(
-        "--gripper-max-mm",
+        "--can-timeout",
         type=float,
-        default=70.0,
-        help="Gripper travel that maps to 100 percent in the LoRa packet.",
+        default=0.02,
+        help="SocketCAN receive timeout in seconds",
+    )
+    parser.add_argument(
+        "--status-rate",
+        type=float,
+        default=2.0,
+        help="Human-readable status print rate in Hz",
     )
     parser.add_argument(
         "--startup-delay",
@@ -50,21 +54,27 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--duration", type=float, default=None, help="Optional run time in seconds")
     parser.add_argument("--write-timeout", type=float, default=None, help="Serial write timeout")
     parser.add_argument("--no-flush", action="store_true", help="Do not serial flush after each packet")
-    parser.add_argument(
-        "--can-ok-timeout",
-        type=float,
-        default=0.0,
-        help=(
-            "Seconds to wait for piper_sdk isOk() before exiting. "
-            "0 means wait forever and print diagnostics periodically."
-        ),
-    )
-    parser.add_argument(
-        "--ignore-can-ok",
-        action="store_true",
-        help="Send packets even when piper_sdk isOk() is false. Use only after verifying CAN reads work.",
-    )
+    parser.add_argument("--verbose-packets", action="store_true", help="Print every LoRa packet line")
     return parser.parse_args()
+
+
+def validate_args(args: argparse.Namespace) -> int:
+    if args.rate <= 0:
+        print("--rate must be greater than 0", file=sys.stderr)
+        return 2
+    if args.can_timeout < 0:
+        print("--can-timeout must be 0 or greater", file=sys.stderr)
+        return 2
+    if args.status_rate < 0:
+        print("--status-rate must be 0 or greater", file=sys.stderr)
+        return 2
+    if args.startup_delay < 0:
+        print("--startup-delay must be 0 or greater", file=sys.stderr)
+        return 2
+    if args.write_timeout is not None and args.write_timeout < 0:
+        print("--write-timeout must be 0 or greater", file=sys.stderr)
+        return 2
+    return 0
 
 
 def drain_board_debug(ser: serial.Serial, stop_event: threading.Event) -> None:
@@ -75,57 +85,15 @@ def drain_board_debug(ser: serial.Serial, stop_event: threading.Event) -> None:
             return
 
 
-def validate_args(args: argparse.Namespace) -> int:
-    if args.rate <= 0:
-        print("--rate must be greater than 0", file=sys.stderr)
-        return 2
-    if args.gripper_max_mm <= 0:
-        print("--gripper-max-mm must be greater than 0", file=sys.stderr)
-        return 2
-    if args.startup_delay < 0:
-        print("--startup-delay must be 0 or greater", file=sys.stderr)
-        return 2
-    if args.write_timeout is not None and args.write_timeout < 0:
-        print("--write-timeout must be 0 or greater", file=sys.stderr)
-        return 2
-    if args.can_ok_timeout < 0:
-        print("--can-ok-timeout must be 0 or greater", file=sys.stderr)
-        return 2
-    return 0
-
-
-def can_link_diagnostics(can_name: str) -> str:
+def open_can_bus(can_interface: str):
     try:
-        result = subprocess.run(
-            ["ip", "-details", "link", "show", can_name],
-            check=False,
-            capture_output=True,
-            text=True,
-            timeout=2.0,
-        )
-    except (OSError, subprocess.SubprocessError) as exc:
-        return f"Could not run `ip -details link show {can_name}`: {exc}"
+        import can
+    except ImportError as exc:
+        raise RuntimeError(
+            "python-can is not installed. Run `pip install -r requirements.txt`."
+        ) from exc
 
-    output = (result.stdout or result.stderr).strip()
-    if not output:
-        output = f"`ip -details link show {can_name}` returned no output"
-    return output
-
-
-def print_can_not_ok(can_name: str, *, elapsed: float, timeout: float) -> None:
-    timeout_text = "no timeout" if timeout == 0 else f"timeout={timeout:.1f}s"
-    print(
-        f"Piper SDK CAN reader is not OK yet "
-        f"(waited {elapsed:.1f}s, {timeout_text}). No LoRa packet sent.",
-        file=sys.stderr,
-    )
-    print(can_link_diagnostics(can_name), file=sys.stderr)
-    print(
-        "Check: CAN adapter is connected, Piper is powered, interface is UP at "
-        "1000000 bitrate, and the source mode is correct. For a master arm, try "
-        "`--configure-master`; for a normal/slave arm, try `--source feedback`.",
-        file=sys.stderr,
-    )
+    return can.interface.Bus(channel=can_interface, interface="socketcan")
 
 
 def main() -> int:
@@ -143,17 +111,18 @@ def main() -> int:
     signal.signal(signal.SIGINT, request_stop)
 
     try:
-        arm = PiperArm(args.can)
-        arm.connect()
-        if args.configure_master:
-            arm.configure_master_input()
-    except (PiperSdkUnavailable, RuntimeError, OSError) as exc:
-        print(f"Piper CAN setup failed: {exc}", file=sys.stderr)
+        bus = open_can_bus(args.can)
+    except (RuntimeError, OSError) as exc:
+        print(f"CAN setup failed on {args.can}: {exc}", file=sys.stderr)
         return 1
 
     period = 1.0 / args.rate
     seq = 0
+    state = MasterCommandState()
+    status = RateLimitedPrinter(args.status_rate)
     start_time = time.monotonic()
+    next_send = start_time
+
     print(f"Opening Board A serial {args.port} at {args.baud} baud")
     try:
         with serial.Serial(
@@ -171,47 +140,41 @@ def main() -> int:
             print(f"Waiting {args.startup_delay:.1f} seconds for ESP32 serial startup...")
             time.sleep(args.startup_delay)
 
-            next_send = time.monotonic()
-            print(
-                f"Streaming real Piper {args.source} state from {args.can} "
-                f"to {args.port} at {args.rate:.2f} Hz. Press Ctrl+C to stop."
-            )
-            can_wait_started = time.monotonic()
-            last_can_warning_at = 0.0
+            print(f"[MASTER] Reading Piper command CAN frames from {args.can}")
+            print(f"[MASTER] Sending raw LoRa teleop packets to {args.port} at {args.rate:.2f} Hz")
+            print(f"[MASTER] deadman={args.deadman}; receiver will ignore packets unless this is true")
+            print("[MASTER] Waiting for complete 0x155/0x156/0x157 joint target set")
+
             while not stop_requested:
                 now = time.monotonic()
                 if args.duration is not None and now - start_time >= args.duration:
                     break
+
+                try:
+                    message = bus.recv(timeout=args.can_timeout)
+                except OSError as exc:
+                    print(f"CAN read failed on {args.can}: {exc}", file=sys.stderr)
+                    return 1
+
+                if message is not None and int(message.arbitration_id) in MASTER_CAN_IDS:
+                    decode_master_frame(message, state)
+
+                now = time.monotonic()
                 if now < next_send:
-                    time.sleep(min(0.02, next_send - now))
                     continue
 
-                if (not args.ignore_can_ok) and (not arm.is_ok()):
-                    elapsed = now - can_wait_started
-                    if now - last_can_warning_at >= 3.0:
-                        print_can_not_ok(
-                            args.can,
-                            elapsed=elapsed,
-                            timeout=args.can_ok_timeout,
-                        )
-                        last_can_warning_at = now
-                    if args.can_ok_timeout > 0 and elapsed >= args.can_ok_timeout:
-                        return 1
-                    time.sleep(0.1)
+                if not state.has_full_joint_target():
+                    status.print("[MASTER] Waiting for complete joint target frames")
+                    next_send = now + period
                     continue
 
-                state = (
-                    arm.read_control_state()
-                    if args.source == "control"
-                    else arm.read_feedback_state()
-                )
-                time_ms = int((now - start_time) * 1000.0)
-                line = build_piper_line(
+                sender_time_ms = int((now - start_time) * 1000.0)
+                line = build_piper_teleop_line(
                     seq,
-                    time_ms,
-                    mdeg_to_cd(state.q_mdeg),
-                    gripper_um_to_p100(state.gripper_um, args.gripper_max_mm),
-                    DEADMAN_ENABLED,
+                    sender_time_ms,
+                    state.joints_raw(),
+                    deadman=args.deadman,
+                    gripper=state.gripper,
                 )
                 try:
                     ser.write(line.encode("ascii"))
@@ -221,20 +184,25 @@ def main() -> int:
                     print(f"Serial write timed out: {exc}", file=sys.stderr)
                     return 1
 
-                q_deg = [value / 1000.0 for value in state.q_mdeg]
-                print(
-                    f"TX seq={seq} "
-                    + " ".join(f"q{i + 1}={value:.2f}" for i, value in enumerate(q_deg))
-                    + f" gripper={state.gripper_um / 1000.0:.1f}mm"
-                )
+                if args.verbose_packets:
+                    print(f"[MASTER] TX {line.strip()}", flush=True)
+                else:
+                    status.print(
+                        f"[MASTER] seq={seq} deadman={args.deadman} "
+                        f"deg={[round(raw_to_deg(value), 3) for value in state.joints_raw()]} "
+                        f"gripper={state.gripper}"
+                    )
+
                 seq += 1
-                next_send += period
+                next_send = now + period
     except serial.SerialException as exc:
         print(f"Serial error on {args.port}: {exc}", file=sys.stderr)
         return 1
     finally:
         reader_stop.set()
-        arm.disconnect()
+        shutdown = getattr(bus, "shutdown", None)
+        if callable(shutdown):
+            shutdown()
 
     print("Real Piper sender stopped cleanly.")
     return 0

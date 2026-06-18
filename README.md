@@ -1,90 +1,107 @@
 # Piper LoRa Teleop Bridge
 
-LoRa-based wireless teleoperation between two AgileX Piper robot arms using two Heltec ESP32 WiFi LoRa 32 V4 boards.
+Real LoRa teleoperation between two AgileX Piper robot arms using two Heltec ESP32 WiFi LoRa 32 V4 boards.
 
-The repository includes both:
-
-- A fake transport test that proves serial -> LoRa -> serial.
-- Real Piper teleoperation scripts that bridge Piper CAN state through the same LoRa packet.
-
-Fake test path:
+This project mirrors the `piper-wireless-teleop` UDP control behavior, but replaces UDP/Wi-Fi with:
 
 ```text
-Computer 1 fake sender
-  -> USB Serial
-  -> ESP32 Board A Serial->LoRa
-  -> LoRa at 923.2 MHz
-  -> ESP32 Board B LoRa->Serial
-  -> USB Serial
-  -> Computer 2 fake receiver
+Computer 1 -> USB Serial -> ESP32 Board A -> LoRa -> ESP32 Board B -> USB Serial -> Computer 2
 ```
 
-The fake sender generates smooth joint targets for `q1` to `q6` and `gripper`. The fake receiver validates packets and prints `Would send CAN command to slave Piper`.
-
-Real teleoperation path:
-
-```text
-Master Piper arm
-  -> CAN
-  -> Computer 1 real Piper sender
-  -> USB Serial
-  -> ESP32 Board A Serial->LoRa
-  -> LoRa at 923.2 MHz
-  -> ESP32 Board B LoRa->Serial
-  -> USB Serial
-  -> Computer 2 real Piper receiver
-  -> CAN
-  -> Slave Piper arm
-```
-
-## Files
-
-```text
-README.md
-requirements.txt
-docs/
-  architecture.md
-  protocol.md
-  troubleshooting.md
-arduino/
-  BoardA_SerialToLoRa/
-    BoardA_SerialToLoRa.ino
-  BoardB_LoRaToSerial/
-    BoardB_LoRaToSerial.ino
-scripts/
-  computer1_fake_sender.py
-  computer2_fake_receiver.py
-  computer1_piper_sender.py
-  computer2_piper_receiver.py
-  piper_lora_protocol.py
-  piper_sdk_adapter.py
-  list_serial_ports.py
-```
+The ESP32 boards are serial LoRa modems. They do not understand Piper CAN. Computer 1 reads raw master Piper SocketCAN command frames, sends compact `PIPER` packets over LoRa, and Computer 2 validates those packets before commanding the slave Piper with `piper_sdk`.
 
 ## Hardware
 
-- 2 Heltec ESP32 WiFi LoRa 32 V4 boards
-- 2 LoRa antennas
-- 2 USB cables
-- Computer 1 for Board A, and Computer 2 for Board B
+Use two separate Piper CAN buses:
 
-Attach antennas to both boards before transmitting. Do not run LoRa TX without an antenna.
+- Master Piper arm connected only to Computer 1.
+- Slave Piper arm connected only to Computer 2.
+- Board A connected by USB to Computer 1.
+- Board B connected by USB to Computer 2.
+- LoRa antennas attached to both Heltec boards before any transmit.
+- Slave arm power cutoff or E-stop within reach.
 
-## Arduino IDE Setup
+Do not connect both Piper arms to the same CAN bus for wireless teleop.
+
+## Step 1: Clone And Create Conda Env
+
+Run on both computers:
+
+```bash
+git clone https://github.com/iliyas-tleuzhan/piper-lora-teleop-bridge.git
+cd piper-lora-teleop-bridge
+conda create -n piper-lora-teleop python=3.11
+conda activate piper-lora-teleop
+pip install -r requirements.txt
+```
+
+Use this conda environment for all commands below:
+
+```bash
+conda activate piper-lora-teleop
+```
+
+## Step 2: Configure CAN On Both Computers
+
+Install CAN tools:
+
+```bash
+sudo apt update
+sudo apt install -y can-utils iproute2 net-tools
+```
+
+Bring `can0` up at Piper bitrate:
+
+```bash
+sudo ip link set can0 down
+sudo ip link set can0 type can bitrate 1000000 restart-ms 100
+sudo ip link set can0 up
+ip -details link show can0
+```
+
+If `can0` does not exist, check your CAN adapter driver and the actual interface name:
+
+```bash
+ip link
+```
+
+To restart CAN after unplugging the adapter or changing wiring:
+
+```bash
+sudo ip link set can0 down
+sudo ip link set can0 type can bitrate 1000000 restart-ms 100
+sudo ip link set can0 up
+```
+
+Check that the master arm is producing command frames on Computer 1:
+
+```bash
+candump can0
+```
+
+For teleop, Computer 1 must see these master command IDs:
+
+- `0x155`: joints 1 and 2
+- `0x156`: joints 3 and 4
+- `0x157`: joints 5 and 6
+- `0x159`: optional gripper command
+
+If Computer 1 later prints `Waiting for complete joint target frames`, run `candump can0` and verify `0x155`, `0x156`, and `0x157` are present.
+
+## Step 3: Upload ESP32 Firmware
+
+Arduino IDE setup:
 
 1. Install Arduino IDE.
-2. On Windows, set the Arduino sketchbook location to `C:\Arduino`.
-   This avoids OneDrive and Cyrillic path problems with some ESP32 tools.
-3. Open Arduino IDE preferences.
-4. Add this Additional Boards Manager URL:
+2. Add this Additional Boards Manager URL:
 
    ```text
    https://resource.heltec.cn/download/package_heltec_esp32_index.json
    ```
 
-5. Open Boards Manager and install the Heltec ESP32 board package.
-6. Open Library Manager and install `Heltec ESP32 Dev-Boards`.
-7. Select these board settings:
+3. Install the Heltec ESP32 board package.
+4. Install the `Heltec ESP32 Dev-Boards` library.
+5. Select:
 
    ```text
    Board: Heltec WiFi LoRa 32(V4)
@@ -93,163 +110,88 @@ Attach antennas to both boards before transmitting. Do not run LoRa TX without a
    Upload Speed: 115200
    ```
 
-## Upload Order
+Upload order:
 
-1. Open `arduino/BoardB_LoRaToSerial/BoardB_LoRaToSerial.ino`.
-2. Upload it to Board B first.
-3. Leave Board B connected to Computer 2 or powered.
-4. Open `arduino/BoardA_SerialToLoRa/BoardA_SerialToLoRa.ino`.
-5. Upload it to Board A.
+1. Upload `arduino/BoardB_LoRaToSerial/BoardB_LoRaToSerial.ino` to Board B.
+2. Leave Board B connected to Computer 2.
+3. Upload `arduino/BoardA_SerialToLoRa/BoardA_SerialToLoRa.ino` to Board A.
+4. Leave Board A connected to Computer 1.
 
-Board A OLED should show `Board A` and `Serial->LoRa`.
-Board B OLED should show stale until packets arrive.
+Board A should show `Board A` / `Serial->LoRa`. Board B should show stale until packets arrive.
 
-## Python Setup With Conda
+## Step 4: Find ESP32 Serial Ports
 
-Use Python 3.10 or newer.
-
-Create and activate a Conda environment:
-
-```bash
-conda create -n piper-lora-teleop python=3.10
-conda activate piper-lora-teleop
-pip install -r requirements.txt
-```
-
-If you prefer a newer Python available in Conda, Python 3.11 or 3.12 is also fine:
-
-```bash
-conda create -n piper-lora-teleop python=3.11
-conda activate piper-lora-teleop
-pip install -r requirements.txt
-```
-
-Optional non-Conda fallback:
-
-Windows:
-
-```powershell
-py -3 -m venv .venv
-.venv\Scripts\activate
-pip install -r requirements.txt
-```
-
-Linux:
-
-```bash
-python3 -m venv .venv
-source .venv/bin/activate
-pip install -r requirements.txt
-```
-
-For real Piper control, run the real scripts on Linux computers with the Piper CAN adapters configured. The official AgileX SDK expects the CAN interface to be up at `1000000` bitrate, for example `can0`. Follow the Piper SDK CAN activation instructions for your adapter before starting these scripts.
-
-List serial ports:
+Run on each computer:
 
 ```bash
 python scripts/list_serial_ports.py
 ```
 
-Example ports:
+Common Linux ports:
 
-- Board A on Computer 1: `COM9` or `/dev/ttyACM0`
-- Board B on Computer 2: `COM10` or `/dev/ttyACM1`
+- Board A on Computer 1: `/dev/ttyACM0`
+- Board B on Computer 2: `/dev/ttyACM1`
 
-## Run The Fake Test
+Use the actual ports printed by the script. Close Arduino Serial Monitor before running Python.
 
-On Computer 2, start the fake receiver first:
+## Step 5: Start Computer 2 First
 
-```bash
-python scripts/computer2_fake_receiver.py --port COM10
-```
-
-On Computer 1, start the fake sender:
+On Computer 2, connected to the slave Piper and Board B:
 
 ```bash
-python scripts/computer1_fake_sender.py --port COM9 --rate 5
+conda activate piper-lora-teleop
+cd piper-lora-teleop-bridge
+python scripts/computer2_piper_receiver.py --port /dev/ttyACM1 --can can0 --confirm MOVE
 ```
 
-Use the real serial ports reported by `list_serial_ports.py`.
+`--confirm MOVE` is required. Without it, the receiver refuses to command the robot.
 
-Expected sender output:
+Useful receiver options:
+
+- `--dry-run`: validate LoRa packets without connecting to or moving Piper.
+- `--stale-timeout 0.5`: warn and hold the last command if packets stop.
+- `--enable-slew-limit --max-step-deg 3`: optional step limiting. Disabled by default for direct teleop feel.
+- `--disable-on-exit`: disable all motors when the receiver exits.
+- `--speed-percent 100 --follow-mode 0xAD`: default Piper motion settings.
+
+## Step 6: Start Computer 1
+
+On Computer 1, connected to the master Piper and Board A:
+
+```bash
+conda activate piper-lora-teleop
+cd piper-lora-teleop-bridge
+python scripts/computer1_piper_sender.py --port /dev/ttyACM0 --can can0 --rate 5 --deadman
+```
+
+`--deadman` is required. The receiver ignores packets with deadman disabled.
+
+Useful sender options:
+
+- `--rate 5`: LoRa packet rate. Keep this modest; LoRa is low bandwidth.
+- `--verbose-packets`: print every raw packet line sent to Board A.
+- `--can-timeout 0.02`: SocketCAN receive timeout.
+
+## Expected Output
+
+Computer 1 should eventually print status like:
 
 ```text
-Opening COM9 at 115200 baud
-Sending fake PIPER packets at 5.00 Hz. Press Ctrl+C to stop.
-TX PIPER,0,1000,1307,1279,2957,3195,628,-2454,5087,1,23592
+[MASTER] seq=12 deadman=True deg=[...] gripper={...}
 ```
 
-Expected receiver output:
+Computer 2 should print status like:
 
 ```text
-Opening COM10 at 115200 baud
-Waiting for valid PIPER packets from Board B. Press Ctrl+C to stop.
-RX seq=0 age=12 ms deadman=enabled q1=  13.07 deg, q2=  12.79 deg, q3=  29.57 deg, q4=  31.95 deg, q5=   6.28 deg, q6= -24.54 deg, gripper= 50.87%
-Would send CAN command to slave Piper
+[SLAVE] accepted seq=12 dropped=0 total_dropped=0 cmd_rate=...
 ```
 
-If packets stop for more than one second, Computer 2 prints:
+If Computer 2 prints no accepted packets:
 
-```text
-STALE: fake slave would stop/freeze now.
-```
-
-Board B also prints a debug line:
-
-```text
-# STALE: no valid LoRa packet for >1s, fake slave would stop/freeze
-```
-
-## Run Real Teleoperation
-
-Run the fake test successfully before trying real robot motion. Keep the ESP32 sketches unchanged; they are serial radio modems.
-
-On Computer 2, start the real receiver first:
-
-```bash
-python scripts/computer2_piper_receiver.py --port COM10 --can can0 --enable-arm
-```
-
-On Computer 1, start the real sender:
-
-```bash
-python scripts/computer1_piper_sender.py --port COM9 --can can0 --rate 5
-```
-
-Use the real serial ports from `scripts/list_serial_ports.py` and the real CAN names from `ip link show` / the Piper SDK CAN setup.
-
-Common Linux example:
-
-```bash
-python scripts/computer2_piper_receiver.py --port /dev/ttyACM1 --can can0 --enable-arm
-python scripts/computer1_piper_sender.py --port /dev/ttyACM0 --can can0 --rate 5
-```
-
-Useful options:
-
-- `computer1_piper_sender.py --source control` reads master-arm control frames. This is the default and is usually what you want for a Piper master arm in master/slave mode.
-- `computer1_piper_sender.py --source feedback` reads feedback frames instead.
-- `computer1_piper_sender.py --configure-master` sends `MasterSlaveConfig(0xFA, 0, 0, 0)` before reading.
-- `computer1_piper_sender.py --can-ok-timeout 10` waits up to 10 seconds for the Piper SDK CAN reader to become healthy, then exits.
-- `computer1_piper_sender.py --ignore-can-ok` bypasses the SDK `isOk()` guard. Use this only after verifying the script is reading real Piper joint values.
-- `computer2_piper_receiver.py --configure-slave` sends `MasterSlaveConfig(0xFC, 0, 0, 0)` before controlling.
-- `computer2_piper_receiver.py --dry-run` validates packets and prints targets without writing Piper CAN motion commands.
-- `computer2_piper_receiver.py --smoothing 0.35 --command-rate 20` controls interpolation between low-rate LoRa updates.
-- `computer2_piper_receiver.py --no-disable-on-exit` leaves the arm enabled when the script exits. The default is to disable on exit.
-
-If packets become stale for more than `--stale-timeout` seconds, or the deadman flag is off, the real receiver stops sending commands and disables the slave arm by default.
-
-If Computer 1 prints `Piper SDK CAN reader is not OK yet`, no LoRa packets are being sent. Check that `can0` is up at `1000000` bitrate and that the master arm is publishing the frame type selected by `--source`. For a master arm, try:
-
-```bash
-python scripts/computer1_piper_sender.py --port /dev/ttyACM0 --can can0 --rate 1 --configure-master
-```
-
-For a normal/slave arm used as a source, try:
-
-```bash
-python scripts/computer1_piper_sender.py --port /dev/ttyACM0 --can can0 --rate 1 --source feedback
-```
+1. Confirm Computer 1 is running with `--deadman`.
+2. Confirm Board A and Board B are powered and have antennas.
+3. Confirm both ESP32 sketches use `923200000` Hz.
+4. Confirm the serial ports are correct and not open in Arduino Serial Monitor.
 
 ## LoRa Settings
 
@@ -260,13 +202,55 @@ python scripts/computer1_piper_sender.py --port /dev/ttyACM0 --can can0 --rate 1
 - Coding rate: `4/5`
 - Preamble length: `8`
 - IQ inversion: off
-- CRC: enabled in the Heltec radio config
+- CRC: enabled
 
-## Piper SDK Notes
+## Safety Checklist
 
-The real scripts use AgileX `piper_sdk`:
+Before enabling motion:
 
-- Computer 1 reads `GetArmJointCtrl()` / `GetArmGripperCtrl()` by default.
-- Computer 2 sends `JointCtrl()` / `GripperCtrl()` after setting joint control mode.
-- Joint units are converted between SDK `0.001 degrees` and LoRa packet centi-degrees.
-- Gripper position is converted between SDK `0.001 mm` and packet percent using `--gripper-max-mm`, default `70.0`.
+- Slave E-stop or power cutoff is reachable.
+- Both arms start in similar poses.
+- Master and slave are on separate CAN buses.
+- `candump can0` works on both computers.
+- Computer 2 receiver is started before Computer 1 sender.
+- Computer 1 sender is started with `--deadman`.
+- Start at low LoRa rate such as `--rate 2` or `--rate 5`.
+
+## Troubleshooting
+
+CAN interface missing:
+
+```bash
+ip link
+```
+
+CAN interface down:
+
+```bash
+sudo ip link set can0 up
+ip -details link show can0
+```
+
+Reset CAN interface:
+
+```bash
+sudo ip link set can0 down
+sudo ip link set can0 type can bitrate 1000000 restart-ms 100
+sudo ip link set can0 up
+```
+
+No master command frames:
+
+```bash
+candump can0
+```
+
+Look for `0x155`, `0x156`, and `0x157`. If they are missing, the sender cannot build a complete teleop target.
+
+Serial port busy:
+
+```bash
+python scripts/list_serial_ports.py
+```
+
+Close Arduino Serial Monitor and any other process using `/dev/ttyACM0` or `/dev/ttyACM1`.
